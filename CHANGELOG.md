@@ -2,6 +2,25 @@
 
 ---
 
+## [2026-08-30 13:00] — Refatoração do pipeline XAI (`05_xai.py`)
+
+### O que mudou
+- **Arquivo reduzido de 1.184 para 513 linhas** — eliminação de código morto e duplicações acumuladas durante o desenvolvimento no Colab
+- Bloco de "Previsão em Tempo Real" que estava copiado e colado 4 vezes foi unificado em um único bloco
+- Removidas ~400 linhas de abordagens antigas comentadas (Google Drive, `httpfs`, `gcloud`) que nunca seriam executadas
+- Todos os `import` e `pip install` movidos para o topo do arquivo — antes estavam espalhados por todo o código
+- Lógica de normalização temporal extraída para funções (`preparar_dataset`, `subsample`), evitando repetição
+- Corrigido bug silencioso: `sample_weights` era reutilizado no re-treino avançado com tamanho inconsistente
+- Variáveis que causariam crash (`best_y_pred`, `final_model_recalibrated`) marcadas com `TODO` explícito
+- Constantes nomeadas (`PROJECT_ID`, `BUCKET_NAME`, `RANDOM_STATE`, `WINDOW_SIZE`) no lugar de valores avulsos
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-08-30 12:00] — Adiciona scripts de geração de dados, análise e XAI
 
 ### Arquivos adicionados
