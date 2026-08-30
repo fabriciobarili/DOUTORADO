@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sobre — Fabricio Barili</title>
+  <meta name="description" content="Pesquisador, programador e especialista em comunicação digital. Doutorando em Computação Aplicada pela Unisinos, membro do DigiLabour e da Surveillance Studies Network." />
+  <meta name="author" content="Fabricio Barili" />
+  <link rel="canonical" href="https://fabriciobarili.com/sobre.html" />
+  <meta property="og:type" content="profile" />
+  <meta property="og:url" content="https://fabriciobarili.com/sobre.html" />
+  <meta property="og:title" content="Sobre — Fabricio Barili" />
+  <meta property="og:description" content="Pesquisador, programador e especialista em comunicação digital. Doutorando em Computação Aplicada (Unisinos), DigiLabour, Surveillance Studies Network." />
+  <meta property="og:locale" content="pt_BR" />
+  <meta name="robots" content="noai, noimageai" />
+  <meta name="CCBot" content="noindex" />
+  <meta name="GPTBot" content="noindex" />
+  <meta name="Google-Extended" content="noindex" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Person",
+    "name": "Fabricio Barili",
+    "jobTitle": "Doutorando em Computação Aplicada",
+    "description": "Pesquisador, programador e especialista em comunicação digital brasileiro.",
+    "affiliation": [
+      { "@type": "Organization", "name": "Universidade do Vale do Rio dos Sinos (Unisinos)" },
+      { "@type": "Organization", "name": "DigiLabour" },
+      { "@type": "Organization", "name": "Surveillance Studies Network" }
+    ],
+    "alumniOf": { "@type": "Organization", "name": "Unisinos" },
+    "url": "https://fabriciobarili.com"
+  }
+  </script>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .sobre-hero { padding: 4.5rem 0 2rem; text-align: center; }
+    .sobre-hero__title { font-size: clamp(2rem, 5vw, 3.2rem); font-weight: 800; letter-spacing: -.02em; line-height: 1.1; margin-bottom: .75rem; }
+    .sobre-hero__lead { max-width: 660px; margin-inline: auto; color: var(--muted); font-size: 1.05rem; line-height: 1.75; }
+    .sobre-body { max-width: 760px; margin-inline: auto; padding: 0 1.25rem 5rem; }
+    .bio-block { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 2rem 2.25rem; margin-bottom: 3rem; font-size: 1rem; line-height: 1.8; color: var(--muted); }
+    .bio-block strong { color: var(--text); }
+    .timeline { display: flex; flex-direction: column; margin-bottom: 3rem; }
+    .timeline-item { display: grid; grid-template-columns: 44px 1fr; gap: 0 1.25rem; }
+    .timeline-item__line { display: flex; flex-direction: column; align-items: center; }
+    .timeline-dot { width: 14px; height: 14px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent2)); flex-shrink: 0; margin-top: .35rem; box-shadow: 0 0 0 3px rgba(96,165,250,.15); }
+    .timeline-connector { width: 2px; flex: 1; background: var(--border); min-height: 28px; }
+    .timeline-item:last-child .timeline-connector { display: none; }
+    .timeline-content { padding-bottom: 2rem; }
+    .timeline-year { font-size: .7rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent2); margin-bottom: .3rem; }
+    .timeline-title { font-size: 1rem; font-weight: 700; color: var(--text); margin-bottom: .25rem; }
+    .timeline-sub { font-size: .8rem; color: var(--accent); font-weight: 600; margin-bottom: .5rem; }
+    .timeline-desc { font-size: .875rem; color: var(--muted); line-height: 1.7; }
+    .affil-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; margin-bottom: 3rem; }
+    @media (min-width: 540px) { .affil-grid { grid-template-columns: repeat(2, 1fr); } }
+    .affil-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.4rem; display: flex; gap: 1rem; align-items: flex-start; transition: border-color var(--trans); }
+    .affil-card:hover { border-color: rgba(167,139,250,.35); }
+    .affil-icon { width: 40px; height: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: rgba(96,165,250,.1); border: 1px solid var(--border); border-radius: 9px; color: var(--accent); }
+    .affil-icon svg { width: 20px; height: 20px; }
+    .affil-name { font-size: .9rem; font-weight: 700; color: var(--text); margin-bottom: .2rem; }
+    .affil-desc { font-size: .8rem; color: var(--muted); line-height: 1.55; }
+    .section-heading { font-size: 1.3rem; font-weight: 700; letter-spacing: -.01em; color: var(--text); margin-bottom: 1.25rem; display: flex; align-items: center; gap: .6rem; }
+    .section-heading::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+    @media (min-width: 640px) { .sobre-body { padding: 0 2rem 5rem; } .bio-block { padding: 2.25rem 2.5rem; } }
+  </style>
+</head>
+<body>
+
+  <header class="navbar" id="navbar">
+    <div class="container navbar__inner">
+      <a href="index.html" class="navbar__brand">Fabricio Barili</a>
+      <nav class="navbar__nav" id="nav-menu" aria-label="Navegação principal">
+        <a href="pesquisas.html" class="nav-link">Pesquisas</a>
+        <a href="projetos.html" class="nav-link">Projetos</a>
+        <a href="publicacoes.html" class="nav-link">Publicações</a>
+        <a href="sobre.html" class="nav-link">Sobre</a>
+        <a href="contato.html" class="nav-link">Contato</a>
+      </nav>
+      <button class="navbar__toggle" id="nav-toggle" aria-label="Abrir menu" aria-expanded="false" aria-controls="nav-menu">
+        <span class="hamburger"></span>
+        <span class="hamburger"></span>
+        <span class="hamburger"></span>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section class="sobre-hero">
+      <div class="container">
+        <span class="badge">Pesquisador · Programador · Comunicador</span>
+        <h1 class="sobre-hero__title">Sobre <span class="gradient-text">Fabricio Barili</span></h1>
+        <p class="sobre-hero__lead">Pesquisador, programador e especialista em comunicação digital brasileiro, cuja trajetória se destaca pela intersecção entre a tecnologia e as ciências sociais.</p>
+      </div>
+    </section>
+
+    <div class="sobre-body">
+      <p class="bio-block">
+        Atuando na fronteira entre o desenvolvimento de software e a análise crítica da mídia, <strong>Fabricio Barili</strong> investiga os impactos da tecnologia na sociedade moderna. Sua filosofia profissional consolidou-se no lema de <strong>"programar para comunicar"</strong> — unindo código ao olhar social para compreender como plataformas digitais, algoritmos e vigilância tecnológica redefinem relações de trabalho, privacidade e poder.
+      </p>
+
+      <h2 class="section-heading">Formação Acadêmica</h2>
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="timeline-item__line"><div class="timeline-dot"></div><div class="timeline-connector"></div></div>
+          <div class="timeline-content">
+            <p class="timeline-year">2024 – 2028</p>
+            <h3 class="timeline-title">Doutorado em Computação Aplicada</h3>
+            <p class="timeline-sub">PPGCA · Unisinos</p>
+            <p class="timeline-desc">Aprofunda modelos tecnológicos orientados à sociedade, com pesquisa na linha de Inteligência Artificial. Integra o Programa de Pós-Graduação em Computação Aplicada (PPGCA) da Universidade do Vale do Rio dos Sinos.</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-item__line"><div class="timeline-dot"></div><div class="timeline-connector"></div></div>
+          <div class="timeline-content">
+            <p class="timeline-year">2020 – 2022</p>
+            <h3 class="timeline-title">Mestrado em Ciências da Comunicação</h3>
+            <p class="timeline-sub">Unisinos</p>
+            <p class="timeline-desc">Focou suas pesquisas em ética algorítmica, dinâmica de plataformas e os impactos da plataformização no mundo do trabalho e nas relações sociais.</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-item__line"><div class="timeline-dot"></div><div class="timeline-connector"></div></div>
+          <div class="timeline-content">
+            <p class="timeline-year">2020</p>
+            <h3 class="timeline-title">Graduação em Comunicação Digital</h3>
+            <p class="timeline-sub">Unisinos</p>
+            <p class="timeline-desc">Bacharel em Comunicação Digital, após passagens por Ciência da Computação e Análise de Sistemas. A trajetória entre as áreas técnicas e as humanidades forjou sua abordagem única: <em>"programar para comunicar"</em>.</p>
+          </div>
+        </div>
+      </div>
+
+      <h2 class="section-heading">Vínculos e Coletivos</h2>
+      <div class="affil-grid">
+        <div class="affil-card">
+          <div class="affil-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><circle cx="4" cy="6" r="2"/><circle cx="20" cy="6" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><path d="M6 6h4M14 6h4M6 18h4M14 18h4M12 10v4"/></svg>
+          </div>
+          <div><p class="affil-name">DigiLabour</p><p class="affil-desc">Membro afiliado do laboratório focado no trabalho em plataformas, gig economy e direitos dos trabalhadores digitais.</p></div>
+        </div>
+        <div class="affil-card">
+          <div class="affil-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </div>
+          <div><p class="affil-name">Surveillance Studies Network</p><p class="affil-desc">Integrante da rede dedicada ao estudo dos mecanismos contemporâneos de vigilância digital e privacidade.</p></div>
+        </div>
+        <div class="affil-card">
+          <div class="affil-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          </div>
+          <div><p class="affil-name">PPGCA — Unisinos</p><p class="affil-desc">Doutorando no Programa de Pós-Graduação em Computação Aplicada, linha de pesquisa de Inteligência Artificial.</p></div>
+        </div>
+        <div class="affil-card">
+          <div class="affil-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M12 12h.01M7 12h.01M17 12h.01"/></svg>
+          </div>
+          <div><p class="affil-name">Jogos Textuais — itch.io</p><p class="affil-desc">Desenvolve de forma independente jogos textuais e conceituais voltados à crítica social em plataformas como o itch.io.</p></div>
+        </div>
+      </div>
+
+      <div style="text-align:center;padding-top:1rem;">
+        <a href="contato.html" class="btn btn--primary">Entre em contato</a>
+        &nbsp;
+        <a href="publicacoes.html" class="btn btn--ghost">Ver publicações</a>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer__inner">
+      <span class="footer__name gradient-text">Fabricio Barili</span>
+      <p class="footer__role">Doutorando em Computação Aplicada · Unisinos · DigiLabour</p>
+      <p class="footer__copy">&copy; 2026 Fabricio Barili</p>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>

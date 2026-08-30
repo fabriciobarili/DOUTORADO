@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Contato — Fabrício Barili</title>
+  <meta name="description" content="Entre em contato com Fabrício Barili para colaborações, entrevistas, convites para eventos e trocas acadêmicas." />
+  <link rel="canonical" href="https://fabriciobarili.com/contato.html" />
+  <meta name="robots" content="noai, noimageai" />
+  <meta name="CCBot" content="noindex" />
+  <meta name="GPTBot" content="noindex" />
+  <meta name="Google-Extended" content="noindex" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .contato-hero {
+      padding: 5rem 0 3rem;
+      text-align: center;
+    }
+    .contato-hero__title {
+      font-size: clamp(2rem, 5vw, 3rem);
+      font-weight: 800;
+      letter-spacing: -.02em;
+      margin-bottom: .75rem;
+    }
+    .contato-hero__sub {
+      color: var(--muted);
+      max-width: 520px;
+      margin-inline: auto;
+      line-height: 1.7;
+    }
+    .contact-links {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1.1rem;
+      max-width: 700px;
+      margin: 2.5rem auto 0;
+    }
+    .contact-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .7rem;
+      padding: 1.75rem 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      font-size: .9rem;
+      font-weight: 500;
+      transition: all var(--trans);
+    }
+    .contact-card:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      transform: translateY(-3px);
+      box-shadow: 0 10px 28px rgba(96,165,250,.13);
+    }
+    .contact-card svg { width: 28px; height: 28px; }
+    .contact-card span { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; font-weight: 700; }
+    .contact-card small { font-size: .78rem; color: var(--muted); text-transform: none; font-weight: 400; letter-spacing: 0; }
+  </style>
+</head>
+<body>
+
+  <header class="navbar" id="navbar">
+    <div class="container navbar__inner">
+      <a href="index.html" class="navbar__brand">Fabrício Barili</a>
+      <nav class="navbar__nav" id="nav-menu" aria-label="Navegação principal">
+        <a href="pesquisas.html" class="nav-link">Pesquisas</a>
+        <a href="projetos.html" class="nav-link">Projetos</a>
+        <a href="publicacoes.html" class="nav-link">Publicações</a>
+        <a href="sobre.html" class="nav-link">Sobre</a>
+        <a href="contato.html" class="nav-link">Contato</a>
+      </nav>
+      <button class="navbar__toggle" id="nav-toggle" aria-label="Abrir menu" aria-expanded="false" aria-controls="nav-menu">
+        <span class="hamburger"></span>
+        <span class="hamburger"></span>
+        <span class="hamburger"></span>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+      <div class="contato-hero">
+        <span class="badge">Aberto a colaborações</span>
+        <h1 class="contato-hero__title">Vamos <span class="gradient-text">Conversar</span></h1>
+        <p class="contato-hero__sub">Aberto para colaborações acadêmicas, entrevistas jornalísticas, convites para eventos e trocas de pesquisa.</p>
+
+        <div class="contact-links">
+          <a href="https://www.linkedin.com/in/fabriciobarili" target="_blank" rel="noopener noreferrer" class="contact-card">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M16 8a6 6 0 0 1 6 6v7h-4v-7a2 2 0 0 0-2-2 2 2 0 0 0-2 2v7h-4v-7a6 6 0 0 1 6-6z"/><rect x="2" y="9" width="4" height="12"/><circle cx="4" cy="4" r="2"/></svg>
+            <span>LinkedIn</span>
+            <small>fabriciobarili</small>
+          </a>
+          <a href="http://lattes.cnpq.br/3905520030270558" target="_blank" rel="noopener noreferrer" class="contact-card">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <span>Lattes</span>
+            <small>Currículo CNPq</small>
+          </a>
+          <a href="mailto:fabriciobarili@gmail.com" class="contact-card">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+            <span>E-mail</span>
+            <small>Pessoal @ GMAIL</small>
+          </a>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer__inner">
+      <span class="footer__name gradient-text">Fabrício Barili</span>
+      <p class="footer__role">Doutorando em Computação Aplicada · Unisinos · DigiLabour</p>
+      <p class="footer__copy">&copy; 2026 Fabrício Barili</p>
+    </div>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
