@@ -85,4 +85,4 @@ Disallow: /
 User-agent: Scrapy
 Disallow: /
 
-Sitemap: https://fabriciobarili.com/sitemap.xml
+Sitemap: https://fabriciobarili.com.br/sitemap.xml
