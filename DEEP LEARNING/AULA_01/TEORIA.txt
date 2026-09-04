@@ -1,0 +1,84 @@
+#O que é deep learning
+Representar modelos de redes neurais com dezenas ou centenas de camadas de neurônios artificiais.
+São modelos com milhões ou bilhões de parâmetros.
+
+Parâmetro ou Peso = é a menor unidade de medida que usamos em um modelo
+É como se tivesse uma equação com XXXXX bilhões de variáveis.
+
+E1 -- p3 (Entrada 1 com peso 1)
+
+E2 -- p2 (Entrada 2 com peso 2) ** processados = saída 1
+
+E3 -- p1 (Entrada 3 com peso 3)
+
+
+A saída 1 pode ser usada como entrada no próximo neurônio e isso ocorre sucessivamente.
+
+Diferentes camadas de IA
+
+IA é a primeira camada, basicamente um IF/ELSE
+-- Machine learning, precisa de labels
+---- Deep Learning o modelo tenta capturar de forma automática os descritores, as características desse problema.
+------ Gen AI ele consegue "criar" a partir do que ele calculou. Ele 'produz' conteúdo 'novo'.
+
+Até 2011 a análise de imagem era baseada em extração de cores, texturas, histograma, etc. Ainda estamos falando de Machine Learning (SVM, Random Forest, XGBoost, etc)
+Para o Deep Learning, em vez de preocupar em extrair as características ele tem a capacidade de aprender e extrair essas características (convuntional neural network, visiontransformer, etc, algoritmo de back propagation).
+
+
+#Perceptron
+
+3 entradas (x) > Somatório > Função Step > Saída (y)
+Se passar de um limiar y = 1
+Se não passar y=0
+
+O problema do Percepton é o XOR. Não existe uma única reta que divide os pontos 0,0 e 1,1. Não há 0,1 e 1,0. então não há o OU-EXCLUSIVO.
+
+Problema não-linear
+o Percepton só trabalha com 0 e 1. Num gráfico dará uma linha.
+Para problemas lineares, OK, show de bola.
+No entanto, se eu traçar 2 linhas eu nunca conseguirei criar 2 grupos sem que uma linha atravesse a outra.
+Estamos em um mundo não-linear. Então, se o modelo não consegue trabalhar esse problema não linear, como ele trabalhará em problemas complexos? (isso lá pela década de 60)
+Após 20 anos, depois desse inverno da IA, veio um método (lá por 1974) que vem o back propagation que dá gás para o DL voltar à ativa.
+Mas, isso não dava para resolver com 1 neurônio, daí criaram as redes neurais encadeadas.
+
+Antes era a função STEP e propuseram para uma função não-linear. Sai o STEP e entra função não-linear.
+
+O que é uma Função não-linear? Dada uma entrada X ela não seguirá uma tendência x e x+1, se f(x) = y. Na f(x+1) = y+2 e para f(x+2) = y+4 na medida que altera em X ele sera um gráfico (DESENHAR O GRÁFICO de uma função não linear)
+
+Quais usadas (funções de ativação):
+-RelU(x), Than(x) o(x)
+--RelU - usa em todas as camadas intermediárias da rede. Não pode dizer que é a melhor de todas, mas dado o que conhecemos suas variações são as que melhor funcionam em camadas intermediárias. Quando for positivo ela é linear, mas não será linear quando o valor for negativo (a sua derivada consegue assumir um valor computacionalmente mais barata)
+--A sigmoid o(x) é usada em classificação binária. É a última camada de ativação.
+--Para problemas não binários, de multi classe, usa a softMax
+--a than é bastante usada em modelos neurais recorrentes (RNN, STN). Sua curva é similar à sigmoid, mas o range dela vai de -1 a 1. É eficiente quando há o sinal negativo. Em sensores, por exemplo, pode ser em sensores.
+
+A ideia de uma multi layer perceptron (MLP) é combinar os perceptrons em camadas e vários por camadas.
+Eles partem do pressuposto que o nosso sistema neurológico também são interconectados.
+O conteito que se tiverem x0, x1, x3, xn, todos os impulsos são recebidos por receptores nossos (soma + função step ou não-linear). As entradas são as informações que cada neurônio recebe. Cada feature é uma entrada.
+Cada entrada é uma linha. Cada linha pode ter um neurônio ou neurônios podem receber cada linha. Aí entra a arquitetura. há problemas que pode ser 1:1 ou n:n. Há regras para serem respeitadas.
+-- A idei ada multi layer perceptron é que todas as camadas anterior se conectam com a próxima camada. E tão a entrada do X1 vai se conectar com a entrada do X2, X3, X4 e XN.
+-- Cada conexão tem um peso, pois, a forma que eu reajo ela é diferente por cada pessoa, portanto isso é aplicado em cada neurônio. Então é Xn * Pn (as vezes o peso será W de weight).
+
+O W é uma convençao internacional não protocolar para PESO.
+W0 * x = y
+O y é quase uma regressão linear.
+Se pegarmos uma tabela e falarmos que X é -1, 0, 1, 2, 3 e o peso será 0.5, Y será+ -0.5, 0, 0.5, 1, 1.5.
+graficamente é linear e todos eles, de qlqr forma, teriam que passar pelo ponto ZERO. Por isso há uma necessidade de um valor que seja totalmente aprendível sem uma influ~encia direta dos dados, aí vem a 'variável independente', mais conhecida como BIAS.
+O BIAS define em que ponto, ao fim do dia, a reta vai cruzar o eixo Y. Ela pode ser 0 ou 1.
+O peso varia a inclinação da reta enquanto o bias muda a altura.
+
+Há regulação e técnicas para controle de peso.
+
+
+--- Cada saída sera: (X0 * W0-0) + (X1 * W1-0) + (X2 * W2-0) + (X3 * W3-0) + Bias0.
+--- Depois do somatório antes tinha a função STEP, agora tem a função de ativação reLU
+-- São 5 dados treináveis, W0-0, W1-0, W2-0, W3-0 e Bias0
+--- Fórmula é (Qte de Neurônios * qtde de entradas) + qtde de bias
+--- isso é só uma camada. Se são multi-layers são múltiplas camadas. O número de camadas pode variar entre as camadas.
+----- 
+
+
+
+
+Mas, o que a função não linear faz com que a rede neural funcione?
+-- IA , responda
