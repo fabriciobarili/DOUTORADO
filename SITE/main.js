@@ -54,9 +54,9 @@ const TRANSLATIONS = {
     },
     sobre: {
       badge: 'Pesquisador · Programador · Comunicador',
-      titleMain: 'Sobre ', titleGrad: 'Fabrício Barili',
+      titleMain: 'Sobre ', titleGrad: 'Fabricio Barili',
       lead: 'Pesquisador, programador e especialista em comunicação digital brasileiro, cuja trajetória se destaca pela intersecção entre a tecnologia e as ciências sociais.',
-      bio: 'Atuando na fronteira entre o desenvolvimento de software e a análise crítica da mídia, <strong>Fabrício Barili</strong> investiga os impactos da tecnologia na sociedade moderna. Sua filosofia profissional consolidou-se no lema de <strong>"programar para comunicar"</strong> — unindo código ao olhar social para compreender como plataformas digitais, algoritmos e vigilância tecnológica redefinem relações de trabalho, privacidade e poder.',
+      bio: 'Atuando na fronteira entre o desenvolvimento de software e a análise crítica da mídia, <strong>Fabricio Barili</strong> investiga os impactos da tecnologia na sociedade moderna. Sua filosofia profissional consolidou-se no lema de <strong>"programar para comunicar"</strong> — unindo código ao olhar social para compreender como plataformas digitais, algoritmos e vigilância tecnológica redefinem relações de trabalho, privacidade e poder.',
       timelineHeading: 'Formação Acadêmica',
       timeline: [
         { year: '2024 – 2028', title: 'Doutorado em Computação Aplicada', sub: 'PPGCA · Unisinos', desc: 'Aprofunda modelos tecnológicos orientados à sociedade, com pesquisa na linha de Inteligência Artificial. Integra o Programa de Pós-Graduação em Computação Aplicada (PPGCA) da Universidade do Vale do Rio dos Sinos.' },
@@ -82,7 +82,7 @@ const TRANSLATIONS = {
         { label: 'E-mail', sub: 'Gmail', href: 'mailto:fabriciobarili@gmail.com' },
       ],
     },
-    footer: { role: 'Doutorando em Computação Aplicada · Unisinos · DigiLabour', copy: '© 2026 Fabrício Barili' },
+    footer: { role: 'Doutorando em Computação Aplicada · Unisinos · DigiLabour', copy: '© 2026 Fabricio Barili' },
   },
 
   en: {
@@ -118,9 +118,9 @@ const TRANSLATIONS = {
     },
     sobre: {
       badge: 'Researcher · Programmer · Communicator',
-      titleMain: 'About ', titleGrad: 'Fabrício Barili',
+      titleMain: 'About ', titleGrad: 'Fabricio Barili',
       lead: 'Brazilian researcher, programmer and digital communication specialist whose career is defined by the intersection between technology and the social sciences.',
-      bio: 'Working at the frontier between software development and critical media analysis, <strong>Fabrício Barili</strong> investigates the impacts of technology on modern society. His professional philosophy is captured in the motto <strong>"program to communicate"</strong> — uniting code with a social lens to understand how digital platforms, algorithms and technological surveillance redefine labor relations, privacy, and power.',
+      bio: 'Working at the frontier between software development and critical media analysis, <strong>Fabricio Barili</strong> investigates the impacts of technology on modern society. His professional philosophy is captured in the motto <strong>"program to communicate"</strong> — uniting code with a social lens to understand how digital platforms, algorithms and technological surveillance redefine labor relations, privacy, and power.',
       timelineHeading: 'Academic Background',
       timeline: [
         { year: '2024 – 2028', title: 'PhD in Applied Computing', sub: 'PPGCA · Unisinos', desc: 'Deepens society-oriented technological models, with research in the Artificial Intelligence track. Member of the Graduate Program in Applied Computing (PPGCA) at Universidade do Vale do Rio dos Sinos.' },
@@ -146,7 +146,7 @@ const TRANSLATIONS = {
         { label: 'Email', sub: 'Gmail', href: 'mailto:fabriciobarili@gmail.com' },
       ],
     },
-    footer: { role: 'PhD Candidate in Applied Computing · Unisinos · DigiLabour', copy: '© 2026 Fabrício Barili' },
+    footer: { role: 'PhD Candidate in Applied Computing · Unisinos · DigiLabour', copy: '© 2026 Fabricio Barili' },
   },
 
   es: {
@@ -182,9 +182,9 @@ const TRANSLATIONS = {
     },
     sobre: {
       badge: 'Investigador · Programador · Comunicador',
-      titleMain: 'Sobre ', titleGrad: 'Fabrício Barili',
+      titleMain: 'Sobre ', titleGrad: 'Fabricio Barili',
       lead: 'Investigador, programador y especialista en comunicación digital brasileño, cuya trayectoria se destaca por la intersección entre la tecnología y las ciencias sociales.',
-      bio: 'Actuando en la frontera entre el desarrollo de software y el análisis crítico de los medios, <strong>Fabrício Barili</strong> investiga los impactos de la tecnología en la sociedad moderna. Su filosofía profesional se consolidó en el lema de <strong>"programar para comunicar"</strong> — uniendo código a la mirada social para comprender cómo las plataformas digitales, algoritmos y la vigilancia tecnológica redefinen las relaciones laborales, la privacidad y el poder.',
+      bio: 'Actuando en la frontera entre el desarrollo de software y el análisis crítico de los medios, <strong>Fabricio Barili</strong> investiga los impactos de la tecnología en la sociedad moderna. Su filosofía profesional se consolidó en el lema de <strong>"programar para comunicar"</strong> — uniendo código a la mirada social para comprender cómo las plataformas digitales, algoritmos y la vigilancia tecnológica redefinen las relaciones laborales, la privacidad y el poder.',
       timelineHeading: 'Formación Académica',
       timeline: [
         { year: '2024 – 2028', title: 'Doctorado en Computación Aplicada', sub: 'PPGCA · Unisinos', desc: 'Profundiza en modelos tecnológicos orientados a la sociedad, con investigación en la línea de Inteligencia Artificial. Integra el Programa de Posgrado en Computación Aplicada (PPGCA) de la Universidade do Vale do Rio dos Sinos.' },
@@ -210,7 +210,7 @@ const TRANSLATIONS = {
         { label: 'Email', sub: 'Gmail', href: 'mailto:fabriciobarili@gmail.com' },
       ],
     },
-    footer: { role: 'Doctorando en Computación Aplicada · Unisinos · DigiLabour', copy: '© 2026 Fabrício Barili' },
+    footer: { role: 'Doctorando en Computación Aplicada · Unisinos · DigiLabour', copy: '© 2026 Fabricio Barili' },
   },
 };
 
@@ -272,9 +272,9 @@ const MENTIONS_BASE = [
     url: 'https://g1.globo.com/trabalho-e-carreira/noticia/2025/09/19/cliques-tempo-em-reuniao-e-monitoramento-de-tela-ao-vivo-os-programas-que-vigiam-funcionarios-em-home-office.ghtml',
     tags: ['bossware', 'vigilância laboral', 'home office', 'monitoramento'],
     desc: {
-      pt: 'Reportagem do G1 sobre softwares de monitoramento de funcionários em home office. Fabrício Barili é entrevistado como especialista em vigilância laboral digital e bossware.',
-      en: 'G1 news report on home office monitoring software including click tracking, screenshots and meeting time control. Fabrício Barili is interviewed as a labor surveillance and bossware expert.',
-      es: 'Reportaje de G1 sobre softwares de monitoreo de empleados en home office. Fabrício Barili es entrevistado como experto en vigilancia laboral digital y bossware.',
+      pt: 'Reportagem do G1 sobre softwares de monitoramento de funcionários em home office. Fabricio Barili é entrevistado como especialista em vigilância laboral digital e bossware.',
+      en: 'G1 news report on home office monitoring software including click tracking, screenshots and meeting time control. Fabricio Barili is interviewed as a labor surveillance and bossware expert.',
+      es: 'Reportaje de G1 sobre softwares de monitoreo de empleados en home office. Fabricio Barili es entrevistado como experto en vigilancia laboral digital y bossware.',
     },
   },
   {
@@ -283,9 +283,9 @@ const MENTIONS_BASE = [
     url: 'https://economiasp.com/2025/02/28/gamificacao-no-transporte-por-app-motivacao-ou-ilusao-para-motoristas/',
     tags: ['gamificação', 'uberização', 'plataformas', 'trabalho por app'],
     desc: {
-      pt: 'Análise sobre o uso de gamificação por plataformas de transporte. Fabrício Barili é consultado sobre a dinâmica de controle disfarçado de motivação no trabalho por app.',
-      en: 'Analysis on the use of gamification by transport platforms like Uber and 99. Fabrício Barili is consulted on the dynamics of control disguised as motivation in app-based work.',
-      es: 'Análisis sobre el uso de gamificación por plataformas de transporte. Fabrício Barili es consultado sobre la dinámica de control disfrazado de motivación en el trabajo por app.',
+      pt: 'Análise sobre o uso de gamificação por plataformas de transporte. Fabricio Barili é consultado sobre a dinâmica de controle disfarçado de motivação no trabalho por app.',
+      en: 'Analysis on the use of gamification by transport platforms like Uber and 99. Fabricio Barili is consulted on the dynamics of control disguised as motivation in app-based work.',
+      es: 'Análisis sobre el uso de gamificación por plataformas de transporte. Fabricio Barili es consultado sobre la dinámica de control disfrazado de motivación en el trabajo por app.',
     },
   },
   {
@@ -294,9 +294,9 @@ const MENTIONS_BASE = [
     url: 'https://economia.uol.com.br/colunas/carlos-juliano-barros/2025/09/16/caso-itau-regras-do-home-office-no-brasil-sao-menos-claras-que-na-europa.htm',
     tags: ['home office', 'regulação', 'direito do trabalho', 'teletrabalho'],
     desc: {
-      pt: 'Coluna sobre as controvérsias da política de home office do Itaú e a comparação com a legislação europeia. Fabrício Barili comenta o cenário regulatório do teletrabalho.',
-      en: 'Column on the controversies around Itaú\'s home office policy compared with European regulation. Fabrício Barili comments on the Brazilian telecommuting regulatory landscape.',
-      es: 'Columna sobre las controversias en torno a la política de home office del Itaú y comparación con la legislación europea. Fabrício Barili comenta el panorama regulatorio del teletrabajo en Brasil.',
+      pt: 'Coluna sobre as controvérsias da política de home office do Itaú e a comparação com a legislação europeia. Fabricio Barili comenta o cenário regulatório do teletrabalho.',
+      en: 'Column on the controversies around Itaú\'s home office policy compared with European regulation. Fabricio Barili comments on the Brazilian telecommuting regulatory landscape.',
+      es: 'Columna sobre las controversias en torno a la política de home office del Itaú y comparación con la legislación europea. Fabricio Barili comenta el panorama regulatorio del teletrabajo en Brasil.',
     },
   },
   {
@@ -305,9 +305,9 @@ const MENTIONS_BASE = [
     url: 'https://oplanob.com/plataformas-de-vigilancia-do-trabalho-se-tornaram-o-panoptico-supostamente-necessario/',
     tags: ['panóptico', 'vigilância laboral', 'privacidade', 'trabalho digital'],
     desc: {
-      pt: 'Análise sobre como plataformas de monitoramento replicam a lógica do panóptico no ambiente digital. Fabrício Barili contribui com perspectiva crítica sobre vigilância algorítmica.',
-      en: 'Analysis of how work monitoring platforms replicate Bentham\'s Panopticon logic in the digital environment. Fabrício Barili contributes a critical perspective on algorithmic surveillance.',
-      es: 'Análisis sobre cómo las plataformas de monitoreo laboral replican la lógica del panóptico en el entorno digital. Fabrício Barili aporta una perspectiva crítica sobre la vigilancia algorítmica.',
+      pt: 'Análise sobre como plataformas de monitoramento replicam a lógica do panóptico no ambiente digital. Fabricio Barili contribui com perspectiva crítica sobre vigilância algorítmica.',
+      en: 'Analysis of how work monitoring platforms replicate Bentham\'s Panopticon logic in the digital environment. Fabricio Barili contributes a critical perspective on algorithmic surveillance.',
+      es: 'Análisis sobre cómo las plataformas de monitoreo laboral replican la lógica del panóptico en el entorno digital. Fabricio Barili aporta una perspectiva crítica sobre la vigilancia algorítmica.',
     },
   },
   {
@@ -316,9 +316,9 @@ const MENTIONS_BASE = [
     url: 'https://www1.folha.uol.com.br/mpme/2024/03/startups-usam-inteligencia-artificial-para-testar-e-contratar-desenvolvedores.shtml',
     tags: ['IA', 'recrutamento', 'trabalho', 'algoritmos'],
     desc: {
-      pt: 'Reportagem sobre o crescente uso de IA por startups para triagem e contratação de desenvolvedores. Fabrício Barili é entrevistado sobre riscos e impactos dos algoritmos em processos seletivos.',
-      en: 'Reportage on the growing use of AI by startups for developer screening and hiring. Fabrício Barili is interviewed about the risks and impacts of algorithmic recruitment processes.',
-      es: 'Reportaje sobre el creciente uso de IA por startups para la selección y contratación de desarrolladores. Fabrício Barili es entrevistado sobre los riesgos e impactos de los algoritmos en los procesos de selección.',
+      pt: 'Reportagem sobre o crescente uso de IA por startups para triagem e contratação de desenvolvedores. Fabricio Barili é entrevistado sobre riscos e impactos dos algoritmos em processos seletivos.',
+      en: 'Reportage on the growing use of AI by startups for developer screening and hiring. Fabricio Barili is interviewed about the risks and impacts of algorithmic recruitment processes.',
+      es: 'Reportaje sobre el creciente uso de IA por startups para la selección y contratación de desarrolladores. Fabricio Barili es entrevistado sobre los riesgos e impactos de los algoritmos en los procesos de selección.',
     },
   },
   {
@@ -327,9 +327,9 @@ const MENTIONS_BASE = [
     url: 'https://reporterbrasil.org.br/2023/04/trabalheira-18-como-a-inteligencia-artificial-reforca-preconceitos-no-rh/',
     tags: ['IA', 'RH', 'viés algorítmico', 'trabalho'],
     desc: {
-      pt: 'Coluna sobre os riscos do uso de IA na gestão de recursos humanos, incluindo a reprodução de vieses discriminatórios em sistemas de triagem. Fabrício Barili é consultado como especialista.',
-      en: 'Column on the risks of using AI in HR management — including the reproduction of discriminatory biases in candidate screening systems. Fabrício Barili is a specialist source.',
-      es: 'Columna sobre los riesgos del uso de IA en la gestión de recursos humanos — incluida la reproducción de sesgos discriminatorios en sistemas de selección. Fabrício Barili es fuente especialista.',
+      pt: 'Coluna sobre os riscos do uso de IA na gestão de recursos humanos, incluindo a reprodução de vieses discriminatórios em sistemas de triagem. Fabricio Barili é consultado como especialista.',
+      en: 'Column on the risks of using AI in HR management — including the reproduction of discriminatory biases in candidate screening systems. Fabricio Barili is a specialist source.',
+      es: 'Columna sobre los riesgos del uso de IA en la gestión de recursos humanos — incluida la reproducción de sesgos discriminatorios en sistemas de selección. Fabricio Barili es fuente especialista.',
     },
   },
   {
@@ -415,9 +415,9 @@ const MENTIONS_BASE = [
     url: 'https://open.spotify.com/episode/2cRoEn5PKWzNboKY0MaNj5',
     tags: ['metaverso', 'podcast', 'sul global', 'ITS Rio'],
     desc: {
-      pt: 'Episódio do podcast do ITS Rio em que Fabrício Barili e Marcos Oliveira discutem o relatório "Metaverso e Trabalho", abordando implicações do metaverso no Sul Global. Disponível no Spotify.',
-      en: 'ITS Rio podcast episode where Fabrício Barili and Marcos Oliveira discuss the "Metaverse and Work" report, addressing its implications in the Global South. Available on Spotify.',
-      es: 'Episodio del podcast del ITS Rio en el que Fabrício Barili y Marcos Oliveira discuten el informe "Metaverso y Trabajo", abordando sus implicaciones en el Sur Global. Disponible en Spotify.',
+      pt: 'Episódio do podcast do ITS Rio em que Fabricio Barili e Marcos Oliveira discutem o relatório "Metaverso e Trabalho", abordando implicações do metaverso no Sul Global. Disponível no Spotify.',
+      en: 'ITS Rio podcast episode where Fabricio Barili and Marcos Oliveira discuss the "Metaverse and Work" report, addressing its implications in the Global South. Available on Spotify.',
+      es: 'Episodio del podcast del ITS Rio en el que Fabricio Barili y Marcos Oliveira discuten el informe "Metaverso y Trabajo", abordando sus implicaciones en el Sur Global. Disponible en Spotify.',
     },
   },
   {
@@ -426,9 +426,9 @@ const MENTIONS_BASE = [
     url: 'https://manualdousuario.net/stefanini-cabine-home-office/',
     tags: ['bossware', 'teletrabalho', 'monitoramento', 'privacidade'],
     desc: {
-      pt: 'Reportagem sobre a cabine de home office monitorada da Stefanini. Fabrício Barili comenta os limites éticos e jurídicos do monitoramento de trabalhadores remotos.',
-      en: 'Reportage on Stefanini\'s monitored home office cabin. Fabrício Barili comments on the ethical and legal limits of remote worker monitoring.',
-      es: 'Reportaje sobre la cabina de home office monitorada de Stefanini. Fabrício Barili comenta los límites éticos y jurídicos del monitoreo de trabajadores remotos.',
+      pt: 'Reportagem sobre a cabine de home office monitorada da Stefanini. Fabricio Barili comenta os limites éticos e jurídicos do monitoramento de trabalhadores remotos.',
+      en: 'Reportage on Stefanini\'s monitored home office cabin. Fabricio Barili comments on the ethical and legal limits of remote worker monitoring.',
+      es: 'Reportaje sobre la cabina de home office monitorada de Stefanini. Fabricio Barili comenta los límites éticos y jurídicos del monitoreo de trabajadores remotos.',
     },
   },
   {
@@ -459,9 +459,9 @@ const MENTIONS_BASE = [
     url: 'https://www.projetodraft.com/tag/fabricio-barili/',
     tags: ['trabalho digital', 'inovação', 'plataformas', 'mídia'],
     desc: {
-      pt: 'Página de tag do Projeto Draft reunindo coberturas e menções a Fabrício Barili em publicações sobre empreendedorismo, inovação e o futuro do trabalho.',
-      en: 'Projeto Draft tag page collecting coverage and mentions of Fabrício Barili in publications about entrepreneurship, innovation and the future of work in the digital economy.',
-      es: 'Página de etiqueta del Proyecto Draft que reúne coberturas y menciones a Fabrício Barili en publicaciones sobre emprendimiento, innovación y el futuro del trabajo en la economía digital.',
+      pt: 'Página de tag do Projeto Draft reunindo coberturas e menções a Fabricio Barili em publicações sobre empreendedorismo, inovação e o futuro do trabalho.',
+      en: 'Projeto Draft tag page collecting coverage and mentions of Fabricio Barili in publications about entrepreneurship, innovation and the future of work in the digital economy.',
+      es: 'Página de etiqueta del Proyecto Draft que reúne coberturas y menciones a Fabricio Barili en publicaciones sobre emprendimiento, innovación y el futuro del trabajo en la economía digital.',
     },
   },
 ];
@@ -481,7 +481,7 @@ function renderNavbar() {
   const n = T.nav;
   el.innerHTML = `
     <div class="container navbar__inner">
-      <a href="${langUrl('pt').replace(/[^/]*$/, '') || ''}index.html" class="navbar__brand">Fabrício Barili</a>
+      <a href="${langUrl('pt').replace(/[^/]*$/, '') || ''}index.html" class="navbar__brand">Fabricio Barili</a>
       <nav class="navbar__nav" id="nav-menu" aria-label="Navegação principal">
         <a href="pesquisas.html" class="nav-link" data-page="pesquisas.html">${n.pesquisas}</a>
         <a href="projetos.html" class="nav-link" data-page="projetos.html">${n.projetos}</a>
@@ -505,7 +505,7 @@ function renderFooter() {
   if (!el) return;
   el.innerHTML = `
     <div class="container footer__inner">
-      <span class="footer__name gradient-text">Fabrício Barili</span>
+      <span class="footer__name gradient-text">Fabricio Barili</span>
       <p class="footer__role">${T.footer.role}</p>
       <p class="footer__copy">${T.footer.copy}</p>
     </div>`;
@@ -520,7 +520,7 @@ function renderHero() {
   const h = T.hero;
   el.innerHTML = `
     <span class="badge">${h.badge}</span>
-    <h1 class="hero__name">Fabrício <span class="gradient-text">Barili</span></h1>
+    <h1 class="hero__name">Fabricio <span class="gradient-text">Barili</span></h1>
     <p class="hero__role">${h.role}</p>
     <p class="hero__tagline">${h.tagline}</p>
     <div class="hero__actions">

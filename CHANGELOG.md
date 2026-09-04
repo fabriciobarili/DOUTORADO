@@ -2,6 +2,75 @@
 
 ---
 
+## [2026-09-03 13:00] — Aula 01 reconstruída com diagramas (perceptron → MLP)
+
+### O que mudou
+- **`AULA DE DEEP LEARNING/AULA_01/TEORIA.md` reconstruído do zero** a partir do material bruto ampliado (`TEORIA.txt` agora cobre perceptron, XOR, funções de ativação, MLP e bias) — passou de 6 para 12 seções
+- **Primeira aplicação da capacidade de desenho da skill**, com figuras de verdade:
+  - `AULA_01/img/funcao_linear_vs_nao_linear.svg` — o gráfico da função não-linear que o próprio material pedia para desenhar
+  - `AULA_01/img/funcoes_ativacao.svg` — curvas de ReLU, sigmoid e tanh
+  - `AULA_01/img/funcoes_ativacao.py` — script Python reprodutível que regenera o SVG das ativações
+  - diagramas Mermaid inline do neurônio, do perceptron e da MLP; plano ASCII do XOR
+- Nova cobertura teórica: perceptron e função STEP, problema do XOR e o "inverno da IA", funções de ativação (ReLU/sigmoid/softmax/tanh), MLP, pesos × bias e contagem de parâmetros treináveis
+- **Resposta à pergunta deixada nas anotações** ("o que a função não-linear faz pela rede?"), com a intuição da "régua que dobra"
+- **Glossário** ampliado com 17 termos novos (perceptron, STEP, limiar, XOR, inverno da IA, função não-linear, função de ativação, ReLU, sigmoid, softmax, tanh, MLP, bias, parâmetro treinável, feature...)
+- Anotações originais em `TEORIA.txt` preservadas intactas
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
+## [2026-09-03 12:15] — Skill do tutor ganha capacidade de desenho
+
+### O que mudou
+- **Skill `tutor-deep-learning` agora sabe desenhar**: nova seção "Capacidade visual" no `SKILL.md` com uma escada de decisão de formato — ASCII/Unicode (esquemas simples), Mermaid (arquiteturas e fluxos) e SVG/script Python (curvas de funções, dispersão, geometria)
+- O tutor passa a desenhar **proativamente** sempre que um conceito for estrutural, relacional ou uma curva (neurônio, camadas, função de ativação, XOR), sem esperar ser pedido
+- **Guia pedagógico** (`abordagem-pedagogica.md`) ganhou receitas prontas de desenho: neurônio e MLP em Mermaid, curvas de ativação em SVG/matplotlib e o plano do XOR
+- Regras de ouro definidas: desenho serve à intuição (nunca enfeite), sempre com legenda e fallback textual, rótulos em português, reprodutibilidade quando gerado por script
+- Gatilhos de ativação da skill ampliados ("desenha", "faz um diagrama", "monta a base da aula")
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
+## [2026-09-03 11:30] — Aula 01: reconstrução do caderno com a virada da visão computacional (~2011)
+
+### O que mudou
+- **`AULA DE DEEP LEARNING/AULA_01/TEORIA.md` reconstruído** a partir do material bruto atualizado (`TEORIA.txt` ganhou anotações novas sobre análise de imagem)
+- Nova **seção 3 — "A virada da visão computacional (~2011)"**: explica, com exemplo concreto, a diferença entre *extrair características na mão* (Machine Learning: SVM, Random Forest, XGBoost) e *deixar a rede aprender as características sozinha* (Deep Learning: CNN, Vision Transformer, backpropagation)
+- Caderno reorganizado numa ordem mais didática (o que é DL → hierarquia IA/ML/DL/GenAI → exemplo da visão → neurônio → pesos → camadas), com referências cruzadas conectando as seções
+- **Glossário** ampliado com sete termos novos: extração manual de características, histograma, SVM/Random Forest/XGBoost, CNN, Vision Transformer e backpropagation — os três últimos marcados como "detalhe fica para aula futura"
+- Anotações originais em `TEORIA.txt` preservadas intactas
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
+## [2026-09-03 10:00] — Base de estudos da Aula 01 completada (IA, ML, DL e Gen AI)
+
+### O que mudou
+- **Caderno de estudos `AULA DE DEEP LEARNING/AULA_01/TEORIA.md`** ganhou a seção que faltava: a hierarquia **IA → Machine Learning → Deep Learning → IA Generativa**, apresentada como círculos concêntricos com analogia do território das ciências sociais
+- Esse conteúdo estava só nas anotações brutas (`TEORIA.txt`) e ainda não tinha sido destilado para o caderno de estudos
+- Seções seguintes renumeradas (neurônio, pesos e camadas) e referências cruzadas ajustadas; resumo "Para lembrar" atualizado
+- **Glossário do curso** recebeu cinco termos novos: Inteligência Artificial, Machine Learning, Rótulo (label), Descritor/característica (feature) e IA Generativa — cada um com analogia consistente com o caderno
+- Anotações originais em `TEORIA.txt` preservadas intactas
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-08-30 13:00] — Refatoração do pipeline XAI (`05_xai.py`)
 
 ### O que mudou
