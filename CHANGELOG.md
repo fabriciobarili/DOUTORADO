@@ -2,6 +2,21 @@
 
 ---
 
+## [2026-09-10 19:27] — Aula 02: caderno de estudos e WebPage do Cap. 6 (Redes Feedforward)
+
+### O que mudou
+- **Base de estudos da Aula 02 construída** a partir do material bruto `AULA_02/cap_6.pdf` (Cap. 6 "Deep Feedforward Networks" de Goodfellow, Bengio & Courville) — o PDF original foi preservado intacto
+- **`AULA DE DEEP LEARNING/AULA_02/TEORIA.md`** — caderno de estudos acessível seguindo a escada intuição → fórmula legendada → exemplo numérico, cobrindo: XOR e a necessidade de não-linearidade, aprendizado por gradiente e funções de custo, unidades de saída (linear/sigmoide/softmax/MDN), funções de ativação (ReLU e variações), profundidade × largura e o Teorema da Aproximação Universal, retropropagação e regra da cadeia, e notas históricas. Inclui "resumo de bolso" e conexões com a Aula 01
+- **`AULA DE DEEP LEARNING/AULA_02/cap_6_resumo.html`** — página de estudo navegável com menu lateral por tópico, busca por assunto, filtro por hashtags e 6 diagramas SVG desenhados à mão (fluxo da rede, geometria do XOR, curvas das ativações, sigmoide, grafo computacional e linha do tempo). Traz os dois níveis pedidos: um resumo rápido de 5 pontos e o conteúdo detalhado com verificações numéricas
+- **Glossário do curso** ampliado com ~25 termos novos da Aula 02 (gradiente, gradiente descendente, entropia cruzada, máxima verossimilhança, gradiente desvanescente, backpropagation formalizado, regra da cadeia, grafo computacional, Jacobiana, Hessiana, softmax, MDN, teorema da aproximação universal...), reaproveitando as analogias já usadas
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-03 13:00] — Aula 01 reconstruída com diagramas (perceptron → MLP)
 
 ### O que mudou

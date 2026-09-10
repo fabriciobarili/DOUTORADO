@@ -103,3 +103,88 @@ Formato de cada verba:
   `(neurônios × entradas) + bias`. *Visto em:* AULA_01.
 - **Feature (característica)** — cada informação de entrada que o neurônio recebe;
   uma entrada = uma feature. *Visto em:* AULA_01.
+
+<!-- ───────────── AULA_02 · Redes Feedforward (Cap. 6 Goodfellow) ───────────── -->
+
+- **Rede feedforward** — rede em que a informação flui **só para frente**, sem
+  ciclos nem memória; da entrada à saída. É o MLP visto na AULA_01, agora
+  formalizado. *Analogia:* linha de montagem — a peça entra bruta e sai acabada,
+  nunca volta. *Visto em:* AULA_02.
+- **Gradiente** — vetor que aponta na direção em que o **erro cresce** mais
+  rápido; treinar = andar na direção *oposta*. *Analogia:* bússola que aponta
+  morro acima numa montanha com nevoeiro — você anda pro lado contrário para
+  descer ao vale. *Visto em:* AULA_02.
+- **Gradiente descendente (SGD)** — o algoritmo de aprendizado: ajusta cada
+  parâmetro um passo na direção que reduz o erro (`θ ← θ − α·∇J`). *Analogia:*
+  descer a montanha às cegas, sentindo a inclinação a cada passo. *Visto em:*
+  AULA_02.
+- **Taxa de aprendizado (α)** — o tamanho do passo do gradiente descendente:
+  grande demais pula o vale, pequeno demais demora. *Analogia:* o tamanho da
+  passada na descida. *Visto em:* AULA_02.
+- **Função de custo / perda (J)** — mede o quanto a rede errou; é a "altitude"
+  que o gradiente descendente tenta minimizar. *Analogia:* a nota de erro numa
+  prova que se quer zerar. *Visto em:* AULA_02.
+- **Máxima verossimilhança** — princípio que escolhe os parâmetros que tornam os
+  dados observados os mais *prováveis*; origem das funções de custo modernas.
+  *Analogia:* ajustar a teoria para que ela explique melhor as evidências que
+  você de fato coletou. *Visto em:* AULA_02.
+- **Entropia cruzada** — função de custo para classificação, derivada da máxima
+  verossimilhança; preferida ao MSE porque não trava quando a sigmoide satura.
+  *Analogia:* custo de "comunicação" entre o que o modelo prevê e o que é real.
+  *Visto em:* AULA_02.
+- **MSE (erro quadrático médio)** — custo para regressão: média dos quadrados
+  das diferenças. Em classificação com sigmoide, satura e trava o aprendizado.
+  *Visto em:* AULA_02.
+- **Não-convexidade** — a função de custo de redes profundas tem *vários* vales
+  (mínimos locais), não um só; o gradiente descendente pode parar num vale que
+  não é o mais fundo — mas costuma ser bom o bastante. *Analogia:* terreno cheio
+  de bacias, não uma única tigela. *Visto em:* AULA_02.
+- **Unidade de saída** — o último neurônio, escolhido conforme a tarefa: linear
+  (número contínuo/regressão), sigmoide (sim/não), softmax (N classes). *Visto
+  em:* AULA_02.
+- **Pré-ativação (z)** — o resultado da combinação linear `Wx+b`, *antes* de
+  passar pela função de ativação. *Visto em:* AULA_02.
+- **Gradiente desvanescente** — em redes profundas com sigmoide/tanh, os
+  gradientes pequenos se multiplicam pela regra da cadeia e viram quase zero nas
+  primeiras camadas, que param de aprender; ReLU resolve isso. *Analogia:*
+  recado que vai perdendo força a cada pessoa da fila até sumir. *Visto em:*
+  AULA_02.
+- **Leaky ReLU / PReLU** — variações do ReLU com uma leve inclinação para
+  entradas negativas, para evitar o "neurônio morto"; no PReLU essa inclinação é
+  aprendida. *Visto em:* AULA_02.
+- **Maxout** — unidade que devolve o máximo entre várias combinações lineares;
+  generaliza o ReLU, mas usa mais parâmetros. *Visto em:* AULA_02.
+- **Teorema da Aproximação Universal** — uma rede com **uma única camada oculta**
+  pode aproximar qualquer função contínua; mas pode precisar de um número
+  *inviável* de neurônios — por isso preferimos profundidade. *Analogia:*
+  qualquer livro cabe em 26 letras (verdade, mas não ajuda a escrevê-lo). *Visto
+  em:* AULA_02.
+- **Profundidade × largura** — redes profundas (muitas camadas) são
+  exponencialmente mais eficientes que redes largas (poucos camadas, muitos
+  neurônios) para a mesma função. *Analogia:* entender texto por níveis (letra →
+  palavra → frase) em vez de tudo de uma vez. *Visto em:* AULA_02.
+- **Backpropagation (retropropagação)** — algoritmo que **calcula os gradientes**
+  de toda a rede num único pass para trás, usando a regra da cadeia; não atualiza
+  os pesos (isso é o SGD). *Analogia:* investigação de acidente — parte do
+  resultado e atribui a cada peça sua fração de culpa. *Visto em:* AULA_02
+  (formalizado; mencionado na AULA_01).
+- **Regra da cadeia** — regra do cálculo que combina taxas de mudança em cascata
+  (`dz/dx = dz/dy · dy/dx`); é a única ferramenta matemática que o backprop usa.
+  *Analogia:* efeito dominó — o impacto total é o produto dos impactos parciais.
+  *Visto em:* AULA_02.
+- **Grafo computacional** — representação de um cálculo como diagrama: nós são
+  operações/variáveis, arestas mostram o que alimenta o quê. *Analogia:*
+  fluxograma de uma receita. *Visto em:* AULA_02.
+- **Forward pass / backward pass** — os dois passos do treino: o *forward*
+  calcula a saída (guardando valores intermediários), o *backward* calcula os
+  gradientes de trás para frente. *Visto em:* AULA_02.
+- **Jacobiana** — matriz de derivadas parciais que diz quanto cada saída muda com
+  cada entrada; aparece na regra da cadeia vetorial. *Analogia:* tabela de
+  sensibilidades cruzadas. *Visto em:* AULA_02.
+- **Hessiana** — matriz de segundas derivadas (curvatura do custo); impraticável
+  de montar com milhões de parâmetros, usam-se produtos Hessiana-vetor e métodos
+  de Krylov. *Visto em:* AULA_02.
+- **MDN (rede de mistura de densidades)** — rede cuja saída é uma *mistura* de
+  Gaussianas, para casos em que um mesmo input admite vários outputs válidos.
+  *Analogia:* prever onde a mão vai estar quando o braço pode dobrar para dois
+  lados. *Visto em:* AULA_02.
