@@ -2,6 +2,23 @@
 
 ---
 
+## [2026-09-12 12:29] — Comparação unificada dos 3 modelos (janela × distância, todos contra todos)
+
+### O que mudou
+- **Novo notebook `03_ANALISE/05_4_Comparacao_Modelos.ipynb`** — unifica os três pipelines antes separados (`05_XAI` = LightGBM, `05_2_FTTransformer`, `05_3_TabTransformer`) em um único documento que roda o grid combinatório **3 algoritmos × 4 janelas (1h/2h/3h/4h) × distância on/off = 24 experimentos** e compara **todos contra todos**
+- **Pipeline de dados e engenharia de features compartilhados** para os três modelos, de modo que a comparação isole o efeito do *algoritmo* e não do pré-processamento: mesmo split temporal (80/20 com validação interna), mesmas features (espaciais H3, cíclicas sin/cos, lags e diffs climáticos) e filtro de variância zero que preserva o sinal espacial do H3 mas descarta colunas constantes
+- **Decisões de comparação justa documentadas** nas células de abertura e conclusão: pesos de classe balanceados iguais para os três (removido o reforço manual ×0.5/×1.5 do `05_XAI`, que enviesaria dados já 1:1:1) e LightGBM com hiperparâmetros fixos por padrão no grid (`LGBM_OPTUNA_TRIALS` reativa o Optuna por cenário)
+- **Seção de comparação geral** com heatmaps por algoritmo (janela × distância), barras dos 24 cenários, ranking completo, melhor cenário por algoritmo e efeito médio da distância; **XAI do melhor cenário** despachando SHAP (LightGBM) ou importância por permutação (transformers)
+- **`03_ANALISE/05_3_TabTransformer.ipynb` atualizado** — janelas configuráveis (1h/2h/3h/4h) e toggle de distância ao aeroporto, com análise combinatória e visualizações comparativas (base do experimento agora generalizada no `05_4`)
+- Documento novo escrito de forma fortemente comentada (markdown explicando metodologia, ressalvas e como ler os resultados), conforme solicitado
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-10 19:27] — Aula 02: caderno de estudos e WebPage do Cap. 6 (Redes Feedforward)
 
 ### O que mudou
