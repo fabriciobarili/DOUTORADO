@@ -2,6 +2,21 @@
 
 ---
 
+## [2026-09-13] — Amostragem equilibrada ao longo do ano e correção de estouro de memória na GPU
+
+### O que mudou
+- **Carga de dados agora é distribuída ao longo do ano inteiro** (`03_ANALISE/05_4_Comparacao_Modelos.ipynb`, célula de carga). Antes pegávamos uma amostra aleatória de 30% de tudo — o que trazia quase 60 milhões de linhas, esmagadoramente da classe comum ("Não Evento"), e deixava os eventos raros (Atraso de Voo e Clima) diluídos. Agora o ano é dividido em 100 fatias de tempo (~3,6 dias cada) e pegamos até 1.000 registros de cada tipo em cada fatia. Resultado: cerca de 100 mil linhas por tipo, bem espalhadas de janeiro a dezembro, em vez de um amontoado desequilibrado
+- **Por que isso importa:** os três tipos de evento passam a ter representação parecida e cobertura temporal uniforme, o que torna a comparação entre modelos mais justa e o treino muito mais leve (de ~60 milhões para ~300 mil linhas)
+- **Correção do erro de memória da placa de vídeo (GPU) que interrompia o experimento.** O FT-Transformer e o TabTransformer tentavam processar todo o conjunto de validação e de teste de uma só vez, o que estourava a memória da GPU e derrubava a execução logo no segundo experimento. Agora o processamento é feito em blocos de 512 registros por vez, tanto na validação quanto na avaliação final, e a memória da GPU é liberada ao fim de cada experimento
+- **Efeito prático:** o loop dos 96 experimentos volta a rodar do início ao fim sem travar, independentemente do tamanho da GPU disponível no Colab (o número de registros por bloco pode ser reduzido caso a placa seja muito pequena)
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-12 12:29] — Comparação unificada dos 3 modelos (janela × distância, todos contra todos)
 
 ### O que mudou
