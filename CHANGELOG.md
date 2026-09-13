@@ -2,6 +2,21 @@
 
 ---
 
+## [2026-09-13] — Recuperação automática após quedas de conexão (retomada do loop + cache da amostra)
+
+### O que mudou
+- **O experimento agora retoma de onde parou** (`03_ANALISE/05_4_Comparacao_Modelos.ipynb`). Cada um dos 96 treinos ganhou um número fixo (1 a 96) e, ao reexecutar a célula do loop, ela lê os resultados já salvos e **pula tudo que já foi concluído** — inclusive resultados gravados antes desta mudança. Combinações e janelas inteiras já prontas são puladas sem refazer o preparo dos dados, poupando tempo. No início, mostra quantos faltam e a lista dos números pendentes
+- **Cache da amostra no Google Drive.** A queda de conexão vinha do reset do ambiente do Colab durante os treinos (que levam horas): ao voltar, era preciso reprocessar a leitura dos ~60 milhões de registros na nuvem, algo lento e propenso a cair de novo. Agora a amostra selecionada (~300 mil linhas) é salva num arquivo no Drive na primeira execução e, nas seguintes, é lida em segundos — a consulta pesada à nuvem só roda se o arquivo não existir (ou se `FORCE_RELOAD` for ligado)
+- **Benefício adicional de consistência:** como a seleção da amostra é aleatória, reconsultar a nuvem no meio do caminho traria linhas diferentes e invalidaria a comparação. O cache garante que os treinos já feitos e os que faltam usem exatamente a mesma amostra
+- **Como recuperar após uma queda:** reconectar e rodar as células de cima para baixo — todas ficam rápidas (a carga de dados vem do cache) — e o loop continua automaticamente do ponto em que parou
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-13] — Amostragem equilibrada ao longo do ano e correção de estouro de memória na GPU
 
 ### O que mudou
