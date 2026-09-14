@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 300" font-family="sans-serif" role="img" aria-label="Curvas das funções de ativação ReLU, sigmoid e tanh">
+  <rect x="0" y="0" width="440" height="300" rx="10" fill="#ffffff"/>
+
+  <!-- linhas de referência y=1 e y=-1 -->
+  <line x1="40" y1="130" x2="410" y2="130" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4 4"/>
+  <line x1="40" y1="230" x2="410" y2="230" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4 4"/>
+
+  <!-- eixos -->
+  <line x1="40" y1="180" x2="410" y2="180" stroke="#334155" stroke-width="1.5"/>
+  <line x1="220" y1="40" x2="220" y2="270" stroke="#334155" stroke-width="1.5"/>
+  <text x="414" y="184" font-size="12" fill="#334155">x</text>
+
+  <!-- ticks -->
+  <text x="36" y="134" font-size="10" fill="#64748b" text-anchor="end">1</text>
+  <text x="36" y="234" font-size="10" fill="#64748b" text-anchor="end">-1</text>
+  <text x="214" y="196" font-size="10" fill="#64748b" text-anchor="end">0</text>
+
+  <!-- ReLU -->
+  <polyline points="40,180 220,180 310,55" fill="none" stroke="#2563eb" stroke-width="3"/>
+  <!-- sigmoid -->
+  <polyline points="40,180 112,178 148,174 184,167 220,155 256,144 292,136 328,133 400,130" fill="none" stroke="#d97706" stroke-width="2.5"/>
+  <!-- tanh -->
+  <polyline points="40,230 112,230 148,228 184,218 220,180 256,142 292,132 328,130 400,130" fill="none" stroke="#7c3aed" stroke-width="2.5"/>
+
+  <!-- legenda -->
+  <rect x="52" y="52" width="150" height="70" rx="6" fill="#f8fafc" stroke="#e2e8f0"/>
+  <line x1="64" y1="68" x2="92" y2="68" stroke="#2563eb" stroke-width="3"/>
+  <text x="100" y="72" font-size="12" fill="#334155">ReLU</text>
+  <line x1="64" y1="88" x2="92" y2="88" stroke="#d97706" stroke-width="2.5"/>
+  <text x="100" y="92" font-size="12" fill="#334155">sigmoid (0 a 1)</text>
+  <line x1="64" y1="108" x2="92" y2="108" stroke="#7c3aed" stroke-width="2.5"/>
+  <text x="100" y="112" font-size="12" fill="#334155">tanh (-1 a 1)</text>
+</svg>
