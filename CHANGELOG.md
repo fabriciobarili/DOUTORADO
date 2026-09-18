@@ -2,6 +2,25 @@
 
 ---
 
+## [2026-09-18] — Narrador natural robusto: previsão do tempo real + explicação por trás da resposta
+
+### O que mudou
+- **Nova versão do narrador em linguagem natural** (`03_ANALISE/05_5_Narrador_Natural.ipynb`). Agora o motorista informa **o dia e a hora** em que pensa em ir ao Aeroporto Salgado Filho (Porto Alegre) e recebe uma resposta direta sobre valer ou não a pena a viagem, esperando um pico de corridas. A resposta deixou de ser um simples "sim/não": o notebook explica **quais fatores** pesaram e **com quais valores** (por exemplo, tal condição de clima em tal horário), para o motorista conferir com os próprios olhos ao chegar
+- **Previsão do tempo de verdade, para datas futuras.** O narrador consulta a previsão do tempo (serviço Open-Meteo) para o dia e a hora pedidos e alimenta os modelos já treinados com essas condições. Quando a previsão não está disponível, ele recorre ao histórico daquele mesmo horário/dia da semana, e só então a uma média geral — sempre deixando claro de onde veio o número
+- **Explicação honesta e ancorada nos dados.** O texto da resposta é gerado por um modelo de linguagem, mas amarrado aos fatores que o modelo realmente usou (via SHAP) e aos valores reais das condições — nada de inventar números. Se os dados de atraso de voo não estiverem entre os fatores ativos, o narrador é instruído a **não** citar contagens de voos, atribuindo o padrão a clima e horário
+- **Se não houver movimento no horário pedido, ele olha 2 horas à frente** e sugere a melhor janela próxima, em vez de simplesmente dizer "não"
+- **Novo notebook de engenharia de features** (`03_ANALISE/05_6_FeatureEng_Individual_vs_Agrupado.ipynb`), que treina os modelos pareados (clima e atraso) usados pelo narrador, preservando corretamente os dados ausentes de clima e evitando "vazamento" de informação que só existe depois do fato
+- **XAI otimizado** (`03_ANALISE/05_XAI_OTIMIZADO.ipynb`) e um documento de **justificativas das escolhas de otimização** (`JUSTIFICATIVAS_OTIMIZACAO_LGBM.txt`), para uso direto na tese — o motivo de cada decisão ficou registrado por escrito
+- **Proteção da chave de API.** O arquivo `03_ANALISE/chave.txt` (que contém uma chave real) passou a ser ignorado pelo controle de versão e **nunca é enviado** ao repositório
+- Materiais de apoio de disciplinas e anotações diversas também foram incluídos neste envio (Arduino, aulas, textos), sem impacto no experimento principal
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-13] — Recuperação automática após quedas de conexão (retomada do loop + cache da amostra)
 
 ### O que mudou

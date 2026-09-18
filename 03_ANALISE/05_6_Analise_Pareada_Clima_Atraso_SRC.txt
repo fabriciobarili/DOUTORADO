@@ -1,0 +1,601 @@
+
+===== cell-0 [markdown] =====
+# 05_6 - Analise Pareada: Clima e Atraso vs Nao Evento
+
+Aprofunda o experimento 7 do `05_4` (LightGBM, janela 1h, `pesos_completos`) separando o problema em **duas comparacoes binarias contra a classe facil (Nao Evento)**:
+
+| Analise | Classes | Pergunta cientifica | Fonte das features |
+|---|---|---|---|
+| **A** | Nao Evento (0) vs Clima (1) | Quais combinacoes de variaveis climaticas geram o evento? | `pipeline_openmeteo_pythermalcomfort_v2.py` |
+| **B** | Nao Evento (0) vs Atraso (2) | Quais horarios, dias, CIA aerea, tipo de linha e rota causam o evento? | `poa_airport_arrivals_and_departures_2025.py` |
+
+## Decisoes metodologicas
+
+- **Vazamento de rotulo (Analise A):** os eventos sinteticos de clima foram *gerados a partir* dos scores de desconforto. Por isso excluimos **todos os scores compostos** (`utci_discomfort_score_0_100`, `thermal_discomfort_*`, `score_*`, `*_flag`, `*_level`, `main_cause`) e mantemos apenas variaveis fisicas brutas e indices termicos. Assim o modelo revela a *combinacao fisica*, nao le de volta o score que definiu o rotulo.
+- **Features de aeroporto (Analise B):** o pipeline do `05_4` so contava voos por janela. Aqui a agregacao e enriquecida com contagens por CIA aerea, tipo de linha, origem e severidade do atraso, alem do atraso medio/maximo por janela.
+- **Sem features espaciais:** `lat`, `lng` e `dist_aeroporto_km` foram **removidas de ambas as analises** (a pedido), para que as previsoes se apoiem apenas nos fatores climaticos (A) e operacionais/temporais (B), nao na localizacao.
+- **Config unica (exp-7):** LightGBM, janela 1h, `pesos_completos`. Sem grid, sem transformers, sem Optuna.
+- **Metodologia herdada do 05_4:** split temporal primeiro (80/20), balanceamento so no treino, avaliacao dupla (teste natural + recorte balanceado).
+
+===== cell-1 [markdown] =====
+## 1. Setup e Instalacoes
+
+===== cell-2 [code] =====
+!pip install -q gcsfs duckdb lightgbm shap h3
+
+import numpy as np
+import pandas as pd
+
+import lightgbm as lgb
+from lightgbm import LGBMClassifier
+import shap
+import h3
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+print('Imports OK')
+
+===== cell-3 [markdown] =====
+## 2. Configuracao (experimento 7)
+
+===== cell-4 [code] =====
+RANDOM_STATE = 42
+JANELA   = '1h'      # janela do melhor cenario (exp-7)
+USE_DIST = True      # exp-7 (as features espaciais sao removidas explicitamente abaixo)
+
+# ---- LightGBM: mesmos params do 05_4 ----
+LGBM_PARAMS = dict(
+    n_estimators=800, learning_rate=0.05, num_leaves=63, subsample=0.8,
+    subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+    random_state=RANDOM_STATE, n_jobs=-1, verbosity=-1,
+)
+
+# ---- Exclusao de vazamento de rotulo (Analise A: Nao Evento vs Clima) ----
+# Eventos de clima foram gerados a partir dos scores de desconforto: incluir qualquer
+# score composto vazaria o rotulo. Mantemos so variaveis fisicas + indices termicos.
+COLS_EXCLUIR_CLIMA_EXPLICITAS = ['utci_discomfort_score_0_100']
+
+def eh_score_composto(col):
+    c = str(col).lower()
+    return ('discomfort_score' in c or 'thermal_discomfort' in c
+            or c.startswith('score_') or c.endswith('_flag')
+            or c.endswith('_level') or 'main_cause' in c)
+
+# Prefixos das features de aeroporto (excluidas da Analise A por nao serem climaticas)
+AIRPORT_PREFIXES = ('qtd_voos', 'qtd_empresas', 'atraso_', 'voos_')
+
+# Features espaciais removidas de AMBAS as previsoes (a pedido): sem lat/lng/distancia
+COLS_EXCLUIR_SEMPRE = ['lat', 'lng', 'dist_aeroporto_km']
+
+# ---- Features de aeroporto (Analise B) ----
+TOP_CIAS    = ['TAM', 'AZU', 'GLO', 'TAP', 'ARG']
+TOP_ORIGENS = ['SBGR', 'SBSP', 'SBKP', 'SBCF', 'SBBR']
+
+# ---- Paths ----
+DRIVE_BASE    = '/content/drive/MyDrive/DOUTORADO'
+CACHE_PARQUET = f'{DRIVE_BASE}/cache_amostra_05_4.parquet'   # reutiliza o cache do 05_4
+FORCE_RELOAD  = False
+CSV_OUT       = f'{DRIVE_BASE}/resultados_05_6_pareado.csv'
+
+print('Config OK | janela', JANELA, '| features espaciais removidas:', COLS_EXCLUIR_SEMPRE)
+
+===== cell-5 [markdown] =====
+## 3. Carga dos Dados (GCS + DuckDB + CSVs)
+
+Reutiliza o cache do `05_4` quando disponivel. Alem da amostra de eventos, carrega o CSV climatico e o CSV de voos atrasados completos (com CIA, linha e origem) para o feature engineering e a analise descritiva.
+
+===== cell-6 [code] =====
+from google.colab import auth, drive
+import gcsfs, duckdb, shutil, os
+
+auth.authenticate_user()
+project_id  = 'doutorado-501917'
+bucket_name = '2025_rides'
+fs = gcsfs.GCSFileSystem(project=project_id)
+try:
+    duckdb.register_filesystem(fs)
+except Exception:
+    pass
+
+drive.mount('/content/drive')
+datasets_dir = f'{DRIVE_BASE}/DATASETS/DATASETS_PRONTOS'
+base_dir     = f'{DRIVE_BASE}/003_DADOS_SINTETICOS/arquivos_base'
+shutil.copy(f'{base_dir}/dados_meteorologicos_utci_horario.csv', './')
+shutil.copy(f'{base_dir}/DADOS_AEROPORTO/03_voos_atrasados_sbpa.csv', './')
+shutil.copy(f'{datasets_dir}/Aeroporto_Salgado_Filho_h3_res12.csv', './')
+
+df_clima = pd.read_csv('/content/dados_meteorologicos_utci_horario.csv')
+df_voos  = pd.read_csv('/content/03_voos_atrasados_sbpa.csv', sep=';')
+df_h3    = pd.read_csv('/content/Aeroporto_Salgado_Filho_h3_res12.csv')
+print('clima', df_clima.shape, '| voos', df_voos.shape, '| h3', df_h3.shape)
+print('Colunas de voos:', list(df_voos.columns))
+
+===== cell-7 [code] =====
+# Cache no Drive: se ja existe a amostra salva pelo 05_4, carrega em segundos.
+_force = globals().get('FORCE_RELOAD', False)
+_cache = globals().get('CACHE_PARQUET', f'{DRIVE_BASE}/cache_amostra_05_4.parquet')
+
+if (not _force) and os.path.exists(_cache):
+    df_combined = pd.read_parquet(_cache)
+    print(f'Amostra carregada do CACHE: {_cache} ({len(df_combined):,} linhas) -- GCS/DuckDB pulado.')
+else:
+    caminhos_base = [f'gs://{bucket_name}/outputs_simulation_V6_{i}/trips_log/_staging/**/*.parquet'
+                     for i in range(3, 8)]
+    todos_arquivos = []
+    for caminho in caminhos_base:
+        todos_arquivos.extend([f'gs://{f}' for f in fs.glob(caminho)])
+    print(f'Total de {len(todos_arquivos):,} arquivos Parquet.')
+    files_sql_array = ', '.join([f"'{f}'" for f in todos_arquivos])
+    inicio_ts, fim_ts = 1735699200, 1767235200
+    N_BUCKETS, POR_BUCKET = 100, 300
+    query = f'''
+        WITH base AS (
+            SELECT request_ts, event_name, origin_h3,
+                CASE WHEN UPPER(event_name) LIKE '%ATRASADO%'   THEN 'DS_VOO'
+                     WHEN UPPER(event_name) LIKE '%SEVERIDADE%' THEN 'DS_CLIMA'
+                     WHEN event_name IS NULL                     THEN 'NULO'
+                     ELSE 'DS_OUTROS' END AS dataset_type,
+                LEAST({N_BUCKETS - 1},
+                      CAST((request_ts - {inicio_ts}) * {N_BUCKETS}.0
+                           / ({fim_ts} - {inicio_ts}) AS INTEGER)) AS bucket
+            FROM read_parquet([{files_sql_array}], hive_partitioning = true)
+            WHERE request_ts >= {inicio_ts} AND request_ts < {fim_ts}
+        ),
+        ranked AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY dataset_type, bucket ORDER BY RANDOM()) AS rn
+            FROM base WHERE dataset_type != 'NULO'
+        )
+        SELECT request_ts, event_name, origin_h3, dataset_type
+        FROM ranked WHERE rn <= {POR_BUCKET}
+    '''
+    df_combined = duckdb.sql(query).df()
+    try:
+        os.makedirs(os.path.dirname(_cache), exist_ok=True)
+        df_combined.to_parquet(_cache, index=False)
+        print(f'Amostra salva no CACHE: {_cache}')
+    except Exception as ex:
+        print('Aviso: nao consegui salvar o cache no Drive:', ex)
+
+DS_VOO    = df_combined[df_combined['dataset_type'] == 'DS_VOO'].drop(columns=['dataset_type'])
+DS_CLIMA  = df_combined[df_combined['dataset_type'] == 'DS_CLIMA'].drop(columns=['dataset_type'])
+DS_OUTROS = df_combined[df_combined['dataset_type'] == 'DS_OUTROS'].drop(columns=['dataset_type'])
+print(f'DS_VOO={len(DS_VOO):,} DS_CLIMA={len(DS_CLIMA):,} DS_OUTROS={len(DS_OUTROS):,}')
+
+===== cell-8 [markdown] =====
+## 4. Distribuicao Natural das Classes (2025)
+
+===== cell-9 [code] =====
+start_date = pd.to_datetime('2025-01-01 00:00:00')
+end_date   = pd.to_datetime('2025-12-31 23:59:59')
+
+for _d in [DS_VOO, DS_CLIMA, DS_OUTROS]:
+    _d['request_ts_dt'] = pd.to_datetime(_d['request_ts'], unit='s')
+
+def _janela_2025(d):
+    return (d[(d['request_ts_dt'] >= start_date) & (d['request_ts_dt'] <= end_date)]
+            .sort_values('request_ts_dt').reset_index(drop=True))
+
+DS_VOO, DS_CLIMA, DS_OUTROS = _janela_2025(DS_VOO), _janela_2025(DS_CLIMA), _janela_2025(DS_OUTROS)
+print('Distribuicao NATURAL (2025):')
+print(f'  DS_OUTROS (0 Nao Evento) : {len(DS_OUTROS):,}')
+print(f'  DS_CLIMA  (1 Clima)      : {len(DS_CLIMA):,}')
+print(f'  DS_VOO    (2 Atraso Voo) : {len(DS_VOO):,}')
+
+===== cell-10 [markdown] =====
+## 5. Feature Engineering (com agregacao de voos enriquecida)
+
+`construir_base_master(window_size)` reconstroi a Base Master das 3 classes para uma janela. A agregacao climatica e por media (mantem todas as numericas). A agregacao de voos e **enriquecida**: alem da contagem total, gera contagens por CIA aerea, tipo de linha, origem e severidade, e o atraso medio/maximo por janela.
+
+===== cell-11 [code] =====
+AER_LAT, AER_LNG = -29.9939, -51.1711   # Aeroporto Salgado Filho (SBPA)
+
+def h3_to_latlng(h):
+    try:
+        return h3.cell_to_latlng(h)   # h3 v4
+    except AttributeError:
+        return h3.h3_to_geo(h)        # h3 v3
+
+def haversine_km(lat1, lng1, lat2, lng2):
+    R = 6371.0
+    p1, p2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1); dlmb = np.radians(lng2 - lng1)
+    a = np.sin(dphi/2)**2 + np.cos(p1)*np.cos(p2)*np.sin(dlmb/2)**2
+    return 2 * R * np.arcsin(np.sqrt(a))
+
+coords_cache = {}
+for hx in pd.concat([DS_VOO, DS_CLIMA, DS_OUTROS])['origin_h3'].dropna().unique():
+    try:
+        coords_cache[hx] = h3_to_latlng(hx)
+    except Exception:
+        coords_cache[hx] = (np.nan, np.nan)
+print(f'Cache H3: {len(coords_cache):,} celulas unicas')
+
+def _agregar_voos(dfv):
+    # Agregacao ENRIQUECIDA de voos atrasados por janela temporal.
+    dfv = dfv.dropna(subset=['time_window']).copy()
+    if 'CODIGO_TIPO_LINHA' in dfv.columns:
+        lt = dfv['CODIGO_TIPO_LINHA'].astype(str).str.strip().str.upper()
+        dfv['linha_N'] = (lt == 'N').astype(int)
+        dfv['linha_I'] = (lt == 'I').astype(int)
+    if 'ICAO_EMPRESA_AEREA' in dfv.columns:
+        cia = dfv['ICAO_EMPRESA_AEREA'].astype(str).str.upper()
+        for c in TOP_CIAS:
+            dfv[f'cia_{c}'] = (cia == c).astype(int)
+    if 'ICAO_AERODROMO_ORIGEM' in dfv.columns:
+        org = dfv['ICAO_AERODROMO_ORIGEM'].astype(str).str.upper()
+        for o in TOP_ORIGENS:
+            dfv[f'orig_{o}'] = (org == o).astype(int)
+    if 'STATUS_ATRASO' in dfv.columns:
+        st = dfv['STATUS_ATRASO'].astype(str)
+        dfv['sev_leve']     = st.str.contains('Leve', case=False, na=False).astype(int)
+        dfv['sev_moderado'] = st.str.contains('Moderado', case=False, na=False).astype(int)
+        dfv['sev_grave']    = st.str.contains('Grave', case=False, na=False).astype(int)
+
+    agg = {'qtd_voos_previstos': ('time_window', 'size')}
+    if 'ICAO_EMPRESA_AEREA' in dfv.columns:
+        agg['qtd_empresas_aereas'] = ('ICAO_EMPRESA_AEREA', 'nunique')
+    if 'ATRASO_MINUTOS' in dfv.columns:
+        dfv['ATRASO_MINUTOS'] = pd.to_numeric(dfv['ATRASO_MINUTOS'], errors='coerce')
+        agg['atraso_medio_min'] = ('ATRASO_MINUTOS', 'mean')
+        agg['atraso_max_min']   = ('ATRASO_MINUTOS', 'max')
+    ind_cols = [c for c in dfv.columns if c.startswith(('linha_', 'cia_', 'orig_', 'sev_'))]
+    for c in ind_cols:
+        agg[f'voos_{c}'] = (c, 'sum')
+    return dfv.groupby('time_window').agg(**agg).reset_index()
+
+def construir_base_master(window_size):
+    dfc = df_clima.copy(); dfv = df_voos.copy()
+    dfc['time'] = pd.to_datetime(dfc['time'])
+    dfv['CHEGADA_REAL'] = pd.to_datetime(dfv['CHEGADA_REAL'], errors='coerce')
+    dfc['time_window'] = dfc['time'].dt.floor(window_size)
+    dfv['time_window'] = dfv['CHEGADA_REAL'].dt.floor(window_size)
+
+    dsv, dsc, dso = DS_VOO.copy(), DS_CLIMA.copy(), DS_OUTROS.copy()
+    for _d, t in [(dso, 0), (dsc, 1), (dsv, 2)]:
+        _d['request_ts_dt'] = pd.to_datetime(_d['request_ts_dt'])
+        _d['time_window']   = _d['request_ts_dt'].dt.floor(window_size)
+        _d['target']        = t
+    df_ev = pd.concat([
+        dso[['time_window', 'origin_h3', 'target', 'request_ts_dt']],
+        dsc[['time_window', 'origin_h3', 'target', 'request_ts_dt']],
+        dsv[['time_window', 'origin_h3', 'target', 'request_ts_dt']],
+    ], ignore_index=True)
+
+    clima_agg = dfc.drop(columns=['time']).groupby('time_window').mean(numeric_only=True).reset_index()
+    voos_agg  = _agregar_voos(dfv)
+
+    dm = pd.merge(df_ev, clima_agg, on='time_window', how='left')
+    dm = pd.merge(dm, voos_agg, on='time_window', how='left')
+    for c in [col for col in voos_agg.columns if col != 'time_window']:
+        dm[c] = dm[c].fillna(0)
+
+    dm['lat'] = dm['origin_h3'].map(lambda h: coords_cache.get(h, (np.nan, np.nan))[0])
+    dm['lng'] = dm['origin_h3'].map(lambda h: coords_cache.get(h, (np.nan, np.nan))[1])
+    dm['dist_aeroporto_km'] = haversine_km(dm['lat'], dm['lng'], AER_LAT, AER_LNG)
+
+    dm['hora']       = dm['time_window'].dt.hour
+    dm['mes']        = dm['time_window'].dt.month
+    dm['dia_semana'] = dm['time_window'].dt.dayofweek
+    for col, period in [('hora', 24), ('mes', 12), ('dia_semana', 7)]:
+        dm[f'{col}_sin'] = np.sin(2*np.pi * dm[col] / period)
+        dm[f'{col}_cos'] = np.cos(2*np.pi * dm[col] / period)
+
+    cols_lag = ['temperature_2m', 'relative_humidity_2m', 'wind_speed_10m']
+    if 'surface_pressure' in clima_agg.columns:
+        cols_lag.append('surface_pressure')
+    ca = clima_agg.sort_values('time_window').copy()
+    for c in cols_lag:
+        if c in ca.columns:
+            ca[f'{c}_lag'] = ca[c].shift(1)
+    lag_cols = [f'{c}_lag' for c in cols_lag if c in ca.columns]
+    dm = pd.merge(dm, ca[['time_window'] + lag_cols], on='time_window', how='left')
+    for c in cols_lag:
+        if c in dm.columns and f'{c}_lag' in dm.columns:
+            dm[f'diff_{c}'] = dm[c] - dm[f'{c}_lag']
+
+    return dm.sort_values('time_window').reset_index(drop=True)
+
+print('construir_base_master() pronta (voos enriquecidos).')
+
+===== cell-12 [markdown] =====
+## 6. Preparacao Pareada e Treino (LightGBM)
+
+`preparar_par(df_master, classe_pos, cols_excluir)` monta um problema binario **Nao Evento (0) vs classe positiva**, com split temporal primeiro, `pesos_completos` (mantem todo o treino + pesos de classe) e recorte balanceado do teste. `treinar_lgbm_par` treina o LightGBM da config exp-7.
+
+===== cell-13 [code] =====
+IDS_EXCL = ['time_window', 'request_ts_dt', 'event_name', 'origin_h3', 'target', 'request_ts', 'trimestre']
+CAT_COLS = ['hora', 'mes', 'dia_semana']
+SPATIAL  = ['lat', 'lng', 'dist_aeroporto_km']
+
+def selecionar_features(df, use_dist, cols_excluir=None):
+    cols_excluir = set(cols_excluir or [])
+    num = df.select_dtypes(include=[np.number]).columns.tolist()
+    cont = [c for c in num if c not in IDS_EXCL + CAT_COLS and not c.startswith('lista_')]
+    var = df[cont].var(numeric_only=True)
+    cont = [c for c in cont if var.get(c, 0) > 0]        # remove constantes
+    if not use_dist:
+        cont = [c for c in cont if c not in SPATIAL]
+    cont = [c for c in cont if c not in cols_excluir]
+    return cont
+
+def _undersample_idx(y, seed=42):
+    rng = np.random.default_rng(seed)
+    classes, counts = np.unique(y, return_counts=True)
+    m = counts.min(); keep = []
+    for c in classes:
+        idx = np.where(y == c)[0]
+        keep.extend(rng.choice(idx, size=m, replace=False))
+    return np.sort(np.array(keep))
+
+def preparar_par(df_master, classe_pos, cols_excluir=None):
+    nome_pos = 'clima' if classe_pos == 1 else 'atraso'
+    df = df_master[df_master['target'].isin([0, classe_pos])].copy()
+    df['target'] = (df['target'] == classe_pos).astype('int64')      # nao_evento=0, positivo=1
+    df = df.sort_values('time_window').reset_index(drop=True)
+
+    cont = selecionar_features(df, USE_DIST, cols_excluir)
+    feat_lgbm = cont + CAT_COLS
+    y_all = df['target'].values.astype('int64')
+    n = len(df); corte = int(n * 0.80)
+    test_pos = np.arange(corte, n); trainval_pos = np.arange(0, corte)
+    vsplit = int(len(trainval_pos) * 0.85)
+    train_pos, val_pos = trainval_pos[:vsplit], trainval_pos[vsplit:]
+    test_bal_pos = test_pos[_undersample_idx(y_all[test_pos], seed=RANDOM_STATE)]
+
+    Xl = df[feat_lgbm].fillna(0)
+    return {
+        'classe_pos': classe_pos, 'nome_pos': nome_pos,
+        'cont': cont, 'features': feat_lgbm,
+        'classe_por_nome': {'nao_evento': 0, nome_pos: 1},
+        'df': df,
+        'X_tr': Xl.iloc[train_pos], 'y_tr': y_all[train_pos],
+        'X_val': Xl.iloc[val_pos], 'y_val': y_all[val_pos],
+        'X_te_nat': Xl.iloc[test_pos], 'y_te_nat': y_all[test_pos],
+        'X_te_bal': Xl.iloc[test_bal_pos], 'y_te_bal': y_all[test_bal_pos],
+    }
+
+def treinar_lgbm_par(dados):
+    X_tr, y_tr = dados['X_tr'], dados['y_tr']
+    X_val, y_val = dados['X_val'], dados['y_val']
+    classes = np.unique(y_tr)
+    pesos = compute_class_weight('balanced', classes=classes, y=y_tr)
+    sw = pd.Series(y_tr).map(dict(zip(classes, pesos))).values
+    params = dict(LGBM_PARAMS); params.update(objective='binary')
+    model = LGBMClassifier(**params)
+    model.fit(X_tr, y_tr, sample_weight=sw, eval_set=[(X_val, y_val)],
+              callbacks=[lgb.early_stopping(40, verbose=False)])
+    p_nat = np.argmax(model.predict_proba(dados['X_te_nat']), axis=1)
+    p_bal = np.argmax(model.predict_proba(dados['X_te_bal']), axis=1)
+    inv = {v: k for k, v in dados['classe_por_nome'].items()}
+    f1c = f1_score(dados['y_te_bal'], p_bal, average=None, labels=[0, 1], zero_division=0)
+    out = {
+        'macro_f1_bal': round(float(f1_score(dados['y_te_bal'], p_bal, average='macro', zero_division=0)), 4),
+        'macro_f1_nat': round(float(f1_score(dados['y_te_nat'], p_nat, average='macro', zero_division=0)), 4),
+        'acc_bal': round(float((p_bal == dados['y_te_bal']).mean()), 4),
+        'acc_nat': round(float((p_nat == dados['y_te_nat']).mean()), 4),
+        f'f1_{inv[0]}': round(float(f1c[0]), 4),
+        f'f1_{inv[1]}': round(float(f1c[1]), 4),
+    }
+    out.update({'_model': model, '_y_pred_nat': p_nat, '_y_true_nat': dados['y_te_nat']})
+    return out
+
+def shap_top20(model, dados, titulo, cor='#2b8cbe'):
+    feats = dados['features']; X_te = dados['X_te_nat']
+    Xs = X_te.sample(n=min(5000, len(X_te)), random_state=RANDOM_STATE).reset_index(drop=True)
+    raw = shap.TreeExplainer(model).shap_values(Xs)
+    if isinstance(raw, list):
+        sv = raw[1]
+    elif getattr(raw, 'ndim', 2) == 3:
+        sv = raw[:, :, 1]
+    else:
+        sv = raw
+    imp = (pd.DataFrame({'feature': feats, 'shap_abs_medio': np.abs(sv).mean(axis=0)})
+           .sort_values('shap_abs_medio', ascending=False).reset_index(drop=True))
+    top = imp.head(20).iloc[::-1]
+    plt.figure(figsize=(9, 8)); plt.barh(top['feature'], top['shap_abs_medio'], color=cor)
+    plt.title(titulo); plt.xlabel('|SHAP| medio'); plt.tight_layout(); plt.show()
+    return imp
+
+print('preparar_par(), treinar_lgbm_par(), shap_top20() prontos.')
+
+===== cell-14 [code] =====
+# Base Master unica (janela 1h), reutilizada pelas duas analises.
+dfm = construir_base_master(JANELA)
+print('Base Master:', dfm.shape)
+print('Distribuicao de classes:', dfm['target'].value_counts().to_dict())
+
+===== cell-15 [markdown] =====
+## 7. Analise A - Nao Evento vs Clima
+
+Objetivo: descobrir **quais combinacoes de variaveis climaticas geram o evento**. Excluimos todos os scores compostos (vazamento) e as features de aeroporto (nao climaticas), deixando so variaveis fisicas brutas e indices termicos derivados do `pythermalcomfort`.
+
+===== cell-16 [code] =====
+# Monta a lista de exclusao: scores compostos (vazamento) + features de aeroporto + espaciais.
+_num_all = dfm.select_dtypes(include=[np.number]).columns.tolist()
+cols_vazamento = [c for c in _num_all if c in COLS_EXCLUIR_CLIMA_EXPLICITAS or eh_score_composto(c)]
+cols_aeroporto = [c for c in _num_all if str(c).startswith(AIRPORT_PREFIXES)]
+COLS_EXCLUIR_CLIMA = sorted(set(cols_vazamento + cols_aeroporto + COLS_EXCLUIR_SEMPRE))
+
+print('Excluidas por VAZAMENTO (scores compostos):')
+print(' ', cols_vazamento)
+print('Excluidas por serem de AEROPORTO (nao climaticas):')
+print(' ', cols_aeroporto)
+print('Excluidas por serem ESPACIAIS (a pedido):')
+print(' ', COLS_EXCLUIR_SEMPRE)
+
+dA = preparar_par(dfm, classe_pos=1, cols_excluir=COLS_EXCLUIR_CLIMA)
+print()
+print('Features CLIMATICAS usadas na Analise A:')
+print(' ', dA['features'])
+_suspeitas = [f for f in dA['features'] if eh_score_composto(f) or f in COLS_EXCLUIR_SEMPRE]
+print('Features indevidas (deve ser lista vazia):', _suspeitas)
+
+===== cell-17 [code] =====
+rA = treinar_lgbm_par(dA)
+print('Nao Evento vs Clima')
+print(f"  macro_f1_bal = {rA['macro_f1_bal']}   macro_f1_nat = {rA['macro_f1_nat']}")
+print(f"  f1_nao_evento = {rA['f1_nao_evento']}   f1_clima = {rA['f1_clima']}")
+
+cm = confusion_matrix(rA['_y_true_nat'], rA['_y_pred_nat'])
+plt.figure(figsize=(5, 4))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=['nao_evento', 'clima'], yticklabels=['nao_evento', 'clima'])
+plt.title('Matriz de Confusao (teste natural) - Nao Evento vs Clima')
+plt.ylabel('Real'); plt.xlabel('Previsto'); plt.tight_layout(); plt.show()
+
+===== cell-18 [code] =====
+# SHAP: quais variaveis climaticas mais separam Clima de Nao Evento.
+impA = shap_top20(rA['_model'], dA, 'SHAP Top 20 - variaveis climaticas que geram o evento de Clima')
+display(impA.head(20))
+
+===== cell-19 [markdown] =====
+### 7.1 Analise descritiva - combinacoes climaticas
+
+Compara a distribuicao das variaveis fisicas entre janelas de Clima e Nao Evento. As variaveis com maior diferenca (e maior |SHAP|) sao as que caracterizam o evento climatico.
+
+===== cell-20 [code] =====
+dfa = dfm[dfm['target'].isin([0, 1])].copy()
+dfa['classe'] = dfa['target'].map({0: 'Nao Evento', 1: 'Clima'})
+
+fis = dA['cont']   # variaveis climaticas continuas selecionadas
+resumo = dfa.groupby('classe')[fis].mean(numeric_only=True).T
+resumo['dif_clima_menos_nao'] = resumo.get('Clima', 0) - resumo.get('Nao Evento', 0)
+resumo = resumo.reindex(resumo['dif_clima_menos_nao'].abs().sort_values(ascending=False).index)
+print('Media por classe - top 15 variaveis com maior diferenca (Clima - Nao Evento):')
+display(resumo.head(15))
+
+top_vars = resumo.head(6).index.tolist()
+fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+for ax, v in zip(axes.ravel(), top_vars):
+    sns.boxplot(data=dfa, x='classe', y=v, ax=ax, showfliers=False)
+    ax.set_title(v); ax.set_xlabel('')
+plt.suptitle('Variaveis climaticas mais discriminantes: Clima vs Nao Evento', y=1.02)
+plt.tight_layout(); plt.show()
+
+===== cell-21 [markdown] =====
+## 8. Analise B - Nao Evento vs Atraso
+
+Objetivo: descobrir **quais horarios, dias da semana, CIA aerea, tipo de linha e rota** caracterizam o evento de atraso. Usa as features de aeroporto enriquecidas + as ciclicas de hora/dia.
+
+===== cell-22 [code] =====
+# Analise B usa as features de aeroporto enriquecidas, mas remove as espaciais
+# (lat, lng, dist_aeroporto_km) a pedido, assim como a Analise A.
+dB = preparar_par(dfm, classe_pos=2, cols_excluir=COLS_EXCLUIR_SEMPRE)
+print('Features usadas na Analise B:')
+print(' ', dB['features'])
+_espaciais_B = [f for f in dB['features'] if f in COLS_EXCLUIR_SEMPRE]
+print('Features espaciais (deve ser lista vazia):', _espaciais_B)
+
+rB = treinar_lgbm_par(dB)
+print()
+print('Nao Evento vs Atraso')
+print(f"  macro_f1_bal = {rB['macro_f1_bal']}   macro_f1_nat = {rB['macro_f1_nat']}")
+print(f"  f1_nao_evento = {rB['f1_nao_evento']}   f1_atraso = {rB['f1_atraso']}")
+
+cm = confusion_matrix(rB['_y_true_nat'], rB['_y_pred_nat'])
+plt.figure(figsize=(5, 4))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Oranges',
+            xticklabels=['nao_evento', 'atraso'], yticklabels=['nao_evento', 'atraso'])
+plt.title('Matriz de Confusao (teste natural) - Nao Evento vs Atraso')
+plt.ylabel('Real'); plt.xlabel('Previsto'); plt.tight_layout(); plt.show()
+
+===== cell-23 [code] =====
+# SHAP: quais features de aeroporto (CIA, linha, origem, hora, dia) mais separam.
+impB = shap_top20(rB['_model'], dB, 'SHAP Top 20 - features que caracterizam o evento de Atraso', cor='#e6550d')
+display(impB.head(20))
+
+===== cell-24 [markdown] =====
+### 8.2 Exportacao dos modelos pareados (para o 05_5)
+
+Salva os dois modelos binarios treinados (`modelo_par_clima` e `modelo_par_atraso`) + seus metadados no Drive. Cada meta registra as **features exatas** daquele modelo (a lista da Analise A e diferente da B), a janela e as metricas. O `05_5_Narrador_Natural.ipynb` carrega ambos e narra a decisao combinada.
+
+===== cell-25 [code] =====
+import joblib, json, os
+
+def _exportar_par(res, dados, escopo, classe_pos_nome, cols_excluir, model_path, meta_path):
+    joblib.dump(res['_model'], model_path)
+    meta = {
+        'algoritmo': 'LightGBM',
+        'escopo': escopo,                          # ex: 'nao_evento_vs_clima'
+        'classe_positiva': classe_pos_nome,        # 'clima' ou 'atraso'
+        'classe_por_nome': dados['classe_por_nome'],   # {'nao_evento':0, <positiva>:1}
+        'features_lgbm': dados['features'],        # features exatas que ESTE modelo usa
+        'cont_features': dados['cont'],
+        'cols_excluir': list(cols_excluir),        # exclusoes aplicadas (vazamento/aeroporto/espaciais)
+        'janela': JANELA,
+        # honesto: reflete se a distancia realmente ficou nas features (removida a pedido)
+        'dist_aeroporto': 'dist_aeroporto_km' in dados['features'],
+        'macro_f1_bal': res['macro_f1_bal'],
+        'macro_f1_nat': res['macro_f1_nat'],
+        'f1_nao_evento': res['f1_nao_evento'],
+        f'f1_{classe_pos_nome}': res[f'f1_{classe_pos_nome}'],
+    }
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    print('Salvo:', model_path)
+    print('       ', meta_path)
+    return meta
+
+os.makedirs(DRIVE_BASE, exist_ok=True)
+meta_clima = _exportar_par(
+    rA, dA, 'nao_evento_vs_clima', 'clima', COLS_EXCLUIR_CLIMA,
+    f'{DRIVE_BASE}/modelo_par_clima.joblib', f'{DRIVE_BASE}/modelo_par_clima_meta.json')
+meta_atraso = _exportar_par(
+    rB, dB, 'nao_evento_vs_atraso', 'atraso', COLS_EXCLUIR_SEMPRE,
+    f'{DRIVE_BASE}/modelo_par_atraso.joblib', f'{DRIVE_BASE}/modelo_par_atraso_meta.json')
+print()
+print('Modelos pareados exportados. O 05_5 carrega ambos e narra a decisao combinada.')
+
+===== cell-26 [markdown] =====
+### 8.1 Analise descritiva - horario, dia, CIA, linha e rota
+
+Reproduz o padrao do pipeline do aeroporto diretamente sobre os voos atrasados de 2025: por hora, por dia da semana, por companhia, por tipo de linha e as combinacoes mais recorrentes.
+
+===== cell-27 [code] =====
+dv = df_voos.copy()
+if 'CHEGADA_PREVISTA' in dv.columns:
+    dv['CHEGADA_PREVISTA'] = pd.to_datetime(dv['CHEGADA_PREVISTA'], errors='coerce')
+dv['CHEGADA_REAL'] = pd.to_datetime(dv['CHEGADA_REAL'], errors='coerce')
+dv = dv[(dv['CHEGADA_REAL'] >= start_date) & (dv['CHEGADA_REAL'] <= end_date)].copy()
+
+ref = dv['CHEGADA_PREVISTA'] if 'CHEGADA_PREVISTA' in dv.columns else dv['CHEGADA_REAL']
+ref = ref.fillna(dv['CHEGADA_REAL'])
+dv['hora'] = ref.dt.hour
+dv['dia_semana'] = ref.dt.dayofweek
+DIAS = ['Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado', 'Domingo']
+dv['nome_dia'] = dv['dia_semana'].map(dict(enumerate(DIAS)))
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+dv['hora'].value_counts().sort_index().plot(kind='bar', ax=axes[0], color='crimson')
+axes[0].set_title('Atrasos por hora do dia'); axes[0].set_xlabel('Hora'); axes[0].set_ylabel('Qtd atrasos')
+dv['nome_dia'].value_counts().reindex(DIAS).plot(kind='bar', ax=axes[1], color='purple')
+axes[1].set_title('Atrasos por dia da semana'); axes[1].set_xlabel(''); axes[1].set_ylabel('Qtd atrasos')
+plt.tight_layout(); plt.show()
+
+===== cell-28 [code] =====
+if 'ICAO_EMPRESA_AEREA' in dv.columns:
+    print('Top 10 CIAs por volume de atrasos:')
+    display(dv['ICAO_EMPRESA_AEREA'].value_counts().head(10))
+if 'CODIGO_TIPO_LINHA' in dv.columns:
+    print('Atrasos por tipo de linha (N=nacional, I=internacional):')
+    display(dv['CODIGO_TIPO_LINHA'].value_counts())
+
+cols_comb = [c for c in ['ICAO_EMPRESA_AEREA', 'CODIGO_TIPO_LINHA', 'ICAO_AERODROMO_ORIGEM', 'nome_dia']
+             if c in dv.columns]
+if len(cols_comb) >= 2:
+    comb = (dv.groupby(cols_comb).size().reset_index(name='qtd_atrasos')
+            .sort_values('qtd_atrasos', ascending=False).reset_index(drop=True))
+    print('Top 20 combinacoes mais recorrentes de atraso (CIA | linha | origem | dia):')
+    display(comb.head(20))
+
+===== cell-29 [markdown] =====
+## 9. Conclusoes
+
+- **Analise A (Clima):** com os scores compostos removidos, o SHAP e as diferencas de media revelam a *combinacao fisica* que caracteriza o evento climatico (as variaveis no topo da lista sao a assinatura do fenomeno, nao o score que o definiu). Este e o entregavel cientifico da pergunta climatica.
+- **Analise B (Atraso):** como os eventos de atraso foram gerados a partir dos voos atrasados reais, o sinal de voo na janela e praticamente definicional (F1 alto esperado). Por isso o entregavel central e a **analise descritiva** (horario, dia, CIA, linha, rota e combinacoes recorrentes), sustentada pelo SHAP que confirma quais fatores o modelo prioriza.
+- **Ressalvas para o artigo:** split temporal primeiro; balanceamento so no treino; teste sempre natural. A exclusao explicita dos scores compostos na Analise A e uma decisao metodologica que deve ser reportada (evita vazamento de rotulo e torna a interpretacao das features honesta).
