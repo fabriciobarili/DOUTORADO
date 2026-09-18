@@ -1,0 +1,541 @@
+================================================================================
+JUSTIFICATIVAS DAS OTIMIZAÇÕES E CORREÇÕES METODOLÓGICAS — MODELOS LIGHTGBM
+Material de fundamentação para a tese (Fabricio Barili)
+Referentes aos notebooks:
+  - 05_XAI_OTIMIZADO.ipynb                        (multiclasse + XAI/SHAP)
+  - 05_6_FeatureEng_Individual_vs_Agrupado.ipynb  (comparação de granularidade)
+Data de elaboração: 2026-09-18
+================================================================================
+
+Como usar este documento
+-------------------------
+Cada item segue a estrutura: [PROBLEMA] o que havia no notebook original e por que é
+inadequado; [EVIDÊNCIA] onde estava (célula/linha) no original; [DECISÃO] o que foi feito
+na versão otimizada; [FUNDAMENTAÇÃO] o motivo teórico/estatístico da escolha, para citar
+na tese. O "porquê" é tão importante quanto o "o quê" — este documento privilegia o porquê.
+
+As mudanças foram levantadas e VERIFICADAS de forma adversarial (revisão independente por
+múltiplos agentes, com refutação explícita). Duas hipóteses iniciais foram CORRIGIDAS na
+verificação e essa correção está incorporada abaixo (ver Parte II, itens C1 e C2) — o
+registro dessas correções é, ele próprio, material metodológico relevante.
+
+================================================================================
+PARTE 0 — NOTA DE HONESTIDADE EXPERIMENTAL
+================================================================================
+Os notebooks foram escritos para o ambiente Google Colab (acesso a GCS + Google Drive) e
+NÃO foram executados durante esta elaboração — não havia acesso aos dados reais. Portanto,
+os NÚMEROS de desempenho só existirão após você rodar no seu ambiente. O que está garantido
+aqui é: (a) integridade estrutural dos notebooks (JSON válido); (b) todas as células de
+código compilam sem erro de sintaxe; (c) a lógica implementa exatamente as decisões abaixo.
+Caminhos de bucket/projeto GCS e nomes de colunas trazem marcadores "<-- ajuste".
+
+================================================================================
+PARTE I — OTIMIZAÇÕES DE VELOCIDADE (05_XAI)
+================================================================================
+
+V1. QUERY ÚNICA (eliminação de execução duplicada)
+[PROBLEMA] O original executava a mesma query DuckDB duas vezes: uma para `display(df.head())`
+  e outra para materializar `df_combined`. Como a query varre Parquet no GCS, o custo de I/O
+  foi pago duas vezes.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-13: `df = duckdb.sql(query_combined).df()` seguido de
+  `df_combined = duckdb.sql(query_combined).df()`.
+[DECISÃO] Executar a query uma única vez e inspecionar o DataFrame já materializado com
+  `df_combined.shape` e `df_combined['dataset_type'].value_counts()`.
+[FUNDAMENTAÇÃO] Em pipelines sobre dados remotos (GCS), o gargalo é I/O de rede, não CPU.
+  Reexecutar uma query de varredura completa duplica o gargalo dominante sem qualquer ganho
+  analítico. Princípio: materializar uma vez, reutilizar em memória.
+
+V2. AMOSTRAGEM ESTRATIFICADA NO DUCKDB (em vez de materializar ~60M linhas)
+[PROBLEMA] O original trazia ~30% de ~60M linhas para a memória (`USING SAMPLE 30 PERCENT`)
+  e só então subamostrava por classe em pandas — risco de OOM na VM do Colab e desperdício
+  de banda/tempo.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-10 (SAMPLE 30 PERCENT) + cell-15 (`.sample(n=min_size)` em
+  memória, após materializar tudo).
+[DECISÃO] Amostragem estratificada balanceada DENTRO do DuckDB, por bucket temporal × classe,
+  via `ROW_NUMBER() OVER (PARTITION BY dataset_type, bucket ORDER BY RANDOM())` com
+  `rn <= POR_BUCKET`. Padrão portado do 05_6 (que já usava esse esquema, cell-7). Adicionado
+  `setseed(0.42)` (materializado com `.fetchall()` numa conexão persistente) para TORNAR O
+  RANDOM() DO DUCKDB MENOS ARBITRÁRIO entre execuções (o original não fixava semente na
+  amostragem SQL).
+  RESSALVA DE RIGOR: `setseed` fixa o gerador, mas `ROW_NUMBER() OVER (... ORDER BY RANDOM())`
+  NÃO garante byte-a-byte a mesma amostra entre execuções/versões — a ordenação depende também
+  do paralelismo do scan, da ordem de leitura dos row-groups do Parquet e da versão do DuckDB.
+  Portanto: a semente reduz a variabilidade e torna a amostra ESTÁVEL o suficiente para a análise
+  (mesma distribuição por bucket×classe), mas NÃO é reprodutibilidade determinística estrita. Para
+  reprodutibilidade forte, seria preciso materializar a amostra (salvar o Parquet amostrado) — que
+  é justamente o cache da amostra adotado no fluxo (ver 05_4).
+[FUNDAMENTAÇÃO] Empurrar a amostragem para o motor colunar (predicate/computation pushdown)
+  reduz o volume transferido em ordens de magnitude: só as linhas selecionadas cruzam a rede.
+  A estratificação por bucket temporal garante cobertura uniforme ao longo do ano (evita que
+  a amostra concentre em poucos meses) e o balanceamento por classe (1:1:1) evita que a classe
+  majoritária domine. Trade-off assumido e documentado: o balanceamento 1:1:1 distorce os
+  priors reais — ver Parte III, L1.
+
+V3. REMOÇÃO DE AGREGAÇÕES `lista_*` DESCARTADAS
+[PROBLEMA] O original construía, por janela, listas de valores (`lambda x: list(x)`) que nunca
+  eram usadas downstream — custo de CPU/memória puro.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-21 (`df_voos_agg` com `lista_*` via lambda; depois descartado).
+[DECISÃO] Manter apenas contagens por janela (size) e as médias climáticas; remover as listas.
+[FUNDAMENTAÇÃO] `groupby.agg` com lambda Python que materializa listas é O(n) em objetos
+  Python (não vetorizado) — a operação mais cara do estágio de agregação. Removê-la, quando o
+  resultado é descartado, é ganho de tempo sem qualquer perda de informação.
+
+V4. `float32` NAS VARIÁVEIS CONTÍNUAS
+[DECISÃO] Converter as features numéricas contínuas para `float32` após a seleção.
+[FUNDAMENTAÇÃO] LightGBM faz binning interno (histogramas) — a precisão de `float64` é
+  irrelevante para a acurácia do split, mas dobra o consumo de memória e o tráfego de cache.
+  `float32` reduz a pegada de memória pela metade, o que importa na VM do Colab e acelera a
+  construção de histogramas. Categóricas permanecem `category` (não são convertidas).
+
+V5. FEATURES CATEGÓRICAS NATIVAS (`categorical_feature`)
+[PROBLEMA] `hora/mes/dia_semana/trimestre` entravam como inteiros contínuos, forçando o LGBM a
+  tratar ciclos (ex.: hora 23 e hora 0) como distantes na reta numérica.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-23 (features temporais como int).
+[DECISÃO] Declarar essas colunas como `category` (pandas); o LightGBM as auto-detecta pelo
+  dtype (não é preciso passar `categorical_feature=` em cada `.fit()`, o que também deixa a
+  calibração via `CalibratedClassifierCV`/`TimeSeriesSplit` funcionar sem `fit_params`).
+[FUNDAMENTAÇÃO] O LightGBM tem tratamento nativo de categóricas: usa a partição ótima de
+  categorias (algoritmo de Fisher para agrupar categorias por gradiente), o que é mais
+  eficiente e frequentemente mais acurado do que one-hot ou do que tratar como contínuo.
+  Também acelera: menos thresholds candidatos por split.
+[DIVERGÊNCIA DELIBERADA ENTRE OS DOIS NOTEBOOKS] No 05_XAI (modelo autônomo) usamos categórica
+  nativa e NÃO sin/cos, evitando dupla codificação. No 05_6, a SEÇÃO DE PRODUÇÃO usa a
+  codificação cíclica sin/cos (numérica) em vez de categórica — não por preferência estatística,
+  mas por CONTRATO: o `05_5_Narrador_Natural.ipynb` monta as features na inferência como
+  numéricas (hora/mes/dia_semana + *_sin/*_cos). Passar categórica ali criaria train/serve skew.
+  Ou seja: a escolha de codificação é subordinada à compatibilidade com o consumidor.
+
+V6. OPTUNA COM PRUNING (`MedianPruner` + `LightGBMPruningCallback`)
+[PROBLEMA] O original rodava 25 trials completos, sem pruning — trials ruins consumiam todas as
+  iterações antes de serem descartados.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-31 (`optuna.create_study(direction='maximize')`, sem pruner).
+[DECISÃO] `MedianPruner(n_warmup_steps=50)` + `LightGBMPruningCallback(trial,'multi_logloss')`
+  no `.fit()`. IMPORTANTE: a direção do estudo foi ajustada para `minimize` (log-loss), tornando
+  o pruning CONSISTENTE com a métrica intermediária monitorada — ver R11.
+[FUNDAMENTAÇÃO] O pruner interrompe trials cujo valor intermediário (loss de validação por
+  iteração de boosting) está abaixo da mediana dos trials anteriores no mesmo passo. Isso
+  concentra orçamento computacional nas regiões promissoras do espaço de hiperparâmetros —
+  ganho típico de 2–5x no tempo de busca sem perda de qualidade do ótimo encontrado. O import
+  do callback usa fallback `optuna.integration` → `optuna_integration` (o namespace mudou entre
+  versões; o try/except evita ImportError).
+
+V7. (DECISÃO DELIBERADA) NÃO migrar todo o pipeline para a API nativa `lgb.train`
+[CONTEXTO] Uma otimização possível é usar a API nativa com `lgb.Dataset(free_raw_data=False)`
+  reaproveitando o Dataset binado entre trials, em vez do wrapper sklearn.
+[DECISÃO] MANTIVEMOS o wrapper `LGBMClassifier` (sklearn) e obtivemos o ganho principal via
+  pruning (V6).
+[FUNDAMENTAÇÃO] Trade-off legibilidade × micro-desempenho. Para uma tese, a clareza do código
+  e a compatibilidade direta com `TreeExplainer`/`CalibratedClassifierCV`/`classification_report`
+  (todos pensados para a API sklearn) supera o ganho marginal de reaproveitar o Dataset binado.
+  O `LightGBMPruningCallback` já entrega a maior parte da economia. Registramos a alternativa
+  para transparência; ela é recomendável apenas se o tempo de tuning se tornar proibitivo.
+
+V8/V9. SHAP SEM RECOMPUTAÇÃO REDUNDANTE
+[PROBLEMA] O original recalculava `predict_proba` para obter predições já disponíveis (cell-40)
+  e havia recomputações evitáveis em torno do SHAP.
+[DECISÃO] Calcular `predict_proba` uma vez (Seção 9) e reutilizar `np.argmax` em vez de chamar
+  o modelo de novo. O waterfall local (cell-43 do original) recomputa o SHAP apenas para a
+  ÚNICA linha do exemplo (`i_local = min(10, len(X_test)-1)`); esse índice cai DENTRO da amostra
+  global (`X_shap = X_test.iloc[:5000]`), então em rigor bastaria indexar `shap_values[i_local]`.
+  Mantivemos o recomputo de 1 linha por clareza (isola a explicação individual sem depender do
+  layout da matriz global); o custo é desprezível (uma linha vs. milhares).
+[FUNDAMENTAÇÃO] `predict_proba` sobre milhares de linhas em modelo com milhares de árvores é
+  caro; reaproveitar o vetor já calculado é ganho sem custo. A recomputação global do SHAP (as
+  milhares de linhas de `X_shap`) é que foi eliminada; a recomputação de uma única linha no
+  waterfall é uma escolha de legibilidade, não uma necessidade — e está documentada como tal
+  para não sugerir uma distinção semântica (dentro vs. fora da amostra) que o código não faz.
+
+================================================================================
+PARTE II — CORREÇÕES DE RIGOR ESTATÍSTICO (05_XAI)
+================================================================================
+
+R1. (CRÍTICO) VAZAMENTO DE RÓTULO ENTRE NOTEBOOKS — escores compostos de UTCI
+[PROBLEMA] Os eventos da classe DS_CLIMA foram GERADOS a partir dos escores compostos de UTCI
+  (ex.: `utci_discomfort_score_0_100` e flags de stress térmico). O 05_6 exclui esses escores
+  das features; o 05_XAI original NÃO os excluía — eles entravam como features preditivas da
+  classe 1. O modelo, então, "prevê" o rótulo a partir da própria régua que o definiu.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-25: o conjunto `cols_bloqueadas` NÃO continha
+  `utci_discomfort_score_0_100` nem as flags de stress. O 05_6 já era mais rigoroso ao filtrar
+  variáveis climáticas explícitas + heurística `eh_score_composto`; portamos a mesma disciplina.
+[CONSEQUÊNCIA] (i) macro-F1 inflada artificialmente para a classe CLIMA; (ii) SHAP dominado
+  pelas variáveis que definem o rótulo, mascarando as relações físicas genuínas; (iii)
+  incomparabilidade com o 05_6, que era mais rigoroso — inconsistência entre capítulos da tese.
+[DECISÃO] Portar `eh_score_composto()` e excluir sistematicamente toda coluna que case com os
+  padrões (utci/discomfort/stress/score/severidade/thermal/conforto/desconforto), inclusive as
+  versões defasadas `*_lag4h`.
+[FUNDAMENTAÇÃO] Vazamento de rótulo (target leakage) é a falha mais grave em aprendizado
+  supervisionado: qualquer feature computada a partir do (ou determinística em função do)
+  rótulo produz desempenho ilusório que desaparece em produção. A regra é excluir toda variável
+  que não estaria disponível ANTES de conhecer o rótulo, ou que participou de sua construção.
+  Esta correção é o item de maior impacto científico do conjunto — deve ser destacada na tese
+  como uma correção de validade interna.
+
+R2. PESOS DE CLASSE PRINCIPIADOS (`balanced` calculado, sem fatores manuais)
+[PROBLEMA] O original calculava `compute_class_weight('balanced')` e depois multiplicava por
+  fatores manuais (`[0]*=0.5; [1]*=1.5; [2]*=1.5`), sem justificativa nem validação.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-27.
+[DECISÃO] Aplicar `class_weight='balanced'` calculado na distribuição REAL de treino (mapa por
+  classe passado ao `LGBMClassifier(class_weight=...)`), SEM os multiplicadores manuais. Note que,
+  após a correção R12 (só janelas com evento, sem empates), o alvo por janela NÃO é 1:1:1 — logo o
+  `balanced` deixa de ser neutro e passa a corrigir de fato o desbalanceamento residual do alvo.
+[FUNDAMENTAÇÃO] Multiplicadores "no olho" sobre pesos já balanceados não têm interpretação
+  estatística e distorcem probabilidades/SHAP de forma não fundamentada. O `balanced` clássico
+  (peso inversamente proporcional à frequência da classe) é a escolha padrão defensável: iguala a
+  contribuição de cada classe à função de perda. Para operar em outro ponto da curva precisão-
+  recall, o instrumento correto continua sendo o LIMIAR de decisão na inferência, não novos fatores.
+
+R3. REFIT DO MODELO FINAL EM TREINO+VALIDAÇÃO
+[PROBLEMA] O original treinava o modelo final apenas no sub-treino `X_tr` e nunca reaproveitava
+  a validação `X_val` para o ajuste final — desperdício de dados e modelo final subtreinado em
+  relação ao que os dados permitiam.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-32 (`final_model.fit(X_tr, y_tr, ...)`).
+[DECISÃO] (1) Determinar `best_iteration` ajustando os melhores hiperparâmetros em FIT com early
+  stopping em EARLY; (2) RE-treinar o modelo final em TODO o TRAINVAL (FIT+EARLY+SEL) com
+  `n_estimators = best_iteration` FIXO e SEM early stopping.
+[FUNDAMENTAÇÃO] A validação serve para escolher hiperparâmetros e o ponto de parada; uma vez
+  escolhidos, reter dados fora do modelo final é perda de sinal — em séries temporais, perde-se
+  justamente os dados mais RECENTES, que costumam ser os mais informativos para prever o futuro.
+  Fixar `n_estimators` no `best_iteration` (em vez de reusar early stopping sobre um conjunto
+  agora incorporado ao treino) evita usar o mesmo dado para parar e para treinar.
+
+R4. OPTUNA COM CONJUNTO DE SCORE INDEPENDENTE DO EARLY STOPPING
+[PROBLEMA] No original, o mesmo `eval_set=[(X_val,y_val)]` era usado para o early stopping E
+  para calcular a métrica `f1_score(y_val, ...)` otimizada pelo Optuna. Isso enviesa a seleção
+  de hiperparâmetros: escolhem-se hiperparâmetros que casam bem com o conjunto que também define
+  a parada — otimismo na estimativa.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-31 (early stopping e retorno da métrica sobre o MESMO X_val).
+[DECISÃO] Três fatias temporais distintas dentro do TRAINVAL: FIT (ajuste), EARLY (early
+  stopping) e SEL (métrica otimizada pelo Optuna). O `objective` ajusta em FIT, para em EARLY e
+  SELECIONA por log-loss em SEL (menor = melhor), registrando a macro-F1 do trial como
+  `user_attr` para inspeção. A escolha de log-loss (e não macro-F1) como alvo do estudo é o que
+  torna a direção `minimize` coerente com o pruning — ver R11.
+[FUNDAMENTAÇÃO] Separar o "conjunto de parada" do "conjunto de avaliação de hiperparâmetros"
+  produz uma estimativa menos enviesada do desempenho de cada configuração — princípio de
+  independência entre decisões de modelagem. Em dados temporais, as três fatias são cronológicas
+  e não se sobrepõem, respeitando a causalidade.
+
+R5. FIM DO VAZAMENTO NO PREENCHIMENTO (`bfill`)
+[PROBLEMA] O original fazia `df_master[FEATURES] = df_master[FEATURES].ffill().bfill()` ANTES do
+  split. O `bfill` preenche buracos com valores FUTUROS, e fazê-lo antes do split mistura treino
+  e teste — vazamento temporal duplo.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-25 (`.ffill().bfill()` global, pré-split).
+[DECISÃO] Preencher DEPOIS do split e POR PARTIÇÃO, usando somente `ffill` (nunca `bfill`).
+  NaNs residuais no início de cada partição são deixados para o LightGBM tratar nativamente.
+[FUNDAMENTAÇÃO] Em séries temporais, qualquer operação que "olhe para frente" (bfill, médias
+  centradas, interpolação bidirecional) injeta informação do futuro no passado. O preenchimento
+  válido é apenas para trás (ffill = "carregar o último valor conhecido"). Fazê-lo por partição
+  impede que estatísticas do teste contaminem o treino. O LightGBM lida com NaN nativamente
+  (aprende a direção default do split), então não é preciso imputar os NaNs iniciais.
+
+R6. CALIBRAÇÃO DE PROBABILIDADES APLICADA (não apenas plotada)
+[PROBLEMA] O original só PLOTAVA a `calibration_curve`, mas nunca calibrava o modelo nem
+  persistia um modelo calibrado — as probabilidades entregues eram as cruas.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-42 (curva plotada) e cell-43 (`joblib.dump(final_model)` — modelo
+  NÃO calibrado salvo).
+[DECISÃO] Aplicar `CalibratedClassifierCV(method='isotonic', cv=TimeSeriesSplit(3))` sobre o
+  TRAINVAL inteiro — treina e calibra por validação cruzada TEMPORAL, sobre a MESMA base do
+  modelo final (sem o descasamento do `cv='prefit'` com base ajustada só em FIT). Persistir DOIS
+  artefatos: `modelo_xai_final` (para avaliação/SHAP) e `modelo_xai_calibrado` (probabilidades).
+[FUNDAMENTAÇÃO] Modelos de boosting não produzem probabilidades bem calibradas por padrão.
+  Calibração isotônica (monotônica, não paramétrica) ajusta a forma da curva probabilidade-
+  prevista × frequência-observada. Usar `TimeSeriesSplit` respeita a ordem temporal (cada fold de
+  calibração é posterior ao seu treino) e faz o modelo calibrado ser treinado sobre o MESMO
+  conjunto (TRAINVAL) do modelo final — coerência que o `prefit` (base só em FIT) não tinha.
+  RESSALVA CRÍTICA registrada no notebook e aqui: como o treino é balanceado (V2/R12), as
+  probabilidades refletem esse prior e não a frequência populacional (<1%); para escala
+  populacional é preciso correção de prior shift (reponderação pela razão de priors). A calibração
+  corrige a forma; o prior shift corrige o nível.
+
+R7. OPTUNA DETERMINÍSTICO (`TPESampler(seed=RANDOM_STATE)`)
+[PROBLEMA] `optuna.create_study(direction='maximize')` sem sampler semeado — busca não
+  reprodutível entre execuções.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-31.
+[DECISÃO] `sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE)`.
+[FUNDAMENTAÇÃO] Reprodutibilidade é requisito de tese: a mesma execução deve produzir os mesmos
+  hiperparâmetros. O TPE é estocástico; semear o sampler fixa a sequência de amostragens.
+
+R8. SPLIT POR TIMESTAMP (não por índice de linha)
+[PROBLEMA] O original cortava por índice de linha: `indice_corte = int(len(df_master)*0.80)`.
+  Isso só é temporalmente correto se o DataFrame estiver perfeitamente ordenado por tempo e sem
+  reindexações — condição frágil.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-26 (`int(len*0.80)` + `.iloc`).
+[DECISÃO] Ordenar por `time_window` e cortar por QUANTIL TEMPORAL do carimbo de tempo
+  (`t.quantile(0.80)`), garantindo que todo o treino precede todo o teste no relógio.
+[FUNDAMENTAÇÃO] O corte por índice é um proxy do corte temporal que quebra silenciosamente se a
+  ordenação mudar. Cortar pelo próprio timestamp torna a divisão treino/teste explicitamente
+  cronológica e robusta a reordenações — pré-requisito de avaliação honesta em séries temporais.
+
+R9. ROBUSTEZ TEMPORAL COM TimeSeriesSplit
+[PROBLEMA] Um único corte treino/teste pode ser favorável ou desfavorável por acaso; o original
+  reportava métricas de um só corte.
+[DECISÃO] Adicionar `TimeSeriesSplit(n_splits=5)` reportando macro-F1 média ± desvio ao longo de
+  cortes cronológicos expansivos.
+[FUNDAMENTAÇÃO] Validação cruzada temporal (janela expansiva, sempre treinando no passado e
+  avaliando no futuro imediato) estima a VARIABILIDADE do desempenho, não só um ponto. Média ±
+  desvio é uma medida de confiança muito mais defensável em banca do que um número único.
+
+R10. `n_estimators` CONSISTENTE (teto único + early stopping)
+[PROBLEMA] O original usava três tetos diferentes em pontos distintos do pipeline: 400
+  (baseline), 600 (dentro do objective do Optuna) e 800 (params finais). Isso torna a comparação
+  baseline × otimizado × final inconsistente (tetos diferentes ⇒ capacidades diferentes).
+[EVIDÊNCIA] 05_XAI.ipynb, cell-29 (400), cell-31 (600 e depois 800).
+[DECISÃO] Um único teto alto (`N_ESTIMATORS_TETO=3000`) em baseline, trials e modelo final; o
+  early stopping decide o número efetivo de árvores em cada caso.
+[FUNDAMENTAÇÃO] Com early stopping, `n_estimators` deve ser apenas um TETO generoso — o algoritmo
+  para sozinho no ponto ótimo de validação. Fixar tetos distintos confunde "capacidade do modelo"
+  com "hiperparâmetro ajustado" e impede comparações limpas. Um teto único, alto o bastante para
+  não ser atingido, elimina essa fonte de variação.
+
+R11. (NOVO — CRÍTICO) DIREÇÃO DE PRUNING CONSISTENTE COM A MÉTRICA MONITORADA
+[PROBLEMA] O original combinava `optuna.create_study(direction='maximize')` (maximizar macro-F1)
+  com `LightGBMPruningCallback(trial,'multi_logloss')`. O callback reporta o log-loss por iteração
+  (MENOR = melhor), mas o estudo está configurado para MAXIMIZAR. O pruner, então, interpreta ao
+  contrário: entende log-loss ALTO como "bom" e poda justamente os trials que estão indo BEM
+  (baixo log-loss), mantendo os ruins. O pruning fica invertido — pior que não ter pruning.
+[EVIDÊNCIA] 05_XAI.ipynb, cell-31 (`direction='maximize'` + callback em `multi_logloss`).
+[DECISÃO] Mudar o estudo para `direction='minimize'` e otimizar o LOG-LOSS em SEL (regra de
+  pontuação própria, coerente com o que o callback monitora). A macro-F1 do melhor trial é
+  registrada como `user_attr` e reportada, mas não é o alvo do estudo.
+[FUNDAMENTAÇÃO] O sinal do pruning e o sinal do objetivo TÊM de concordar; caso contrário o pruner
+  atua como um "anti-otimizador". Além disso, otimizar uma regra de pontuação própria (log-loss)
+  em vez de uma métrica de limiar (F1) produz um ranking de hiperparâmetros mais estável e
+  probabilidades melhores — e casa naturalmente com o passo de calibração (R6). Registrar a macro-F1
+  em paralelo preserva a leitura interpretável sem contaminar a direção da otimização.
+
+R12. (NOVO) ALVO MULTICLASSE BEM DEFINIDO (janelas com evento + sem empates)
+[PROBLEMA] O alvo `y = argmax(qtd_outros, qtd_clima, qtd_voo)` era computado sobre TODAS as
+  janelas de clima. Em janelas SEM nenhum evento (contagens 0,0,0), `argmax` retorna 0
+  SILENCIOSAMENTE, rotulando-as como DS_OUTROS — fabricando exemplos da classe 0 a partir de
+  ausência de dado. Empates (ex.: 2 CLIMA e 2 VOO) também eram resolvidos arbitrariamente pelo
+  `argmax` (fica com o primeiro índice), injetando rótulo espúrio.
+[EVIDÊNCIA] 05_XAI.ipynb, cell (definição de `y` via `cont.argmax(axis=1)` sem filtro).
+[DECISÃO] (i) Manter apenas janelas com ≥1 evento (`soma das contagens > 0`); (ii) DESCARTAR
+  janelas com empate exato no topo (1º == 2º maior), reportando a fração descartada; (iii) só então
+  `argmax`. A distribuição REAL do alvo resultante é impressa (e deixa de ser 1:1:1 — daí R2 aplicar
+  `balanced` de fato).
+[FUNDAMENTAÇÃO] O rótulo de um exemplo tem de ser uma decisão bem definida a partir do dado. Janela
+  vazia não é "DS_OUTROS": é ausência de observação — incluí-la contamina a classe 0 com ruído e
+  infla artificialmente sua frequência. Empates não têm classe majoritária: forçá-la é rótulo
+  inventado. Filtrar e reportar a fração descartada é mais honesto (e a fração é, ela mesma, um dado
+  sobre a densidade de eventos).
+
+================================================================================
+PARTE III — FEATURE ENGINEERING E COMPARAÇÃO DE GRANULARIDADE (05_6)
+================================================================================
+
+C1. (CORREÇÃO VERIFICADA) INDIVIDUAL ≡ AGRUPADO QUANDO A JANELA = RESOLUÇÃO DO CLIMA
+[HIPÓTESE INICIAL] "Basta comparar features individuais (merge_asof) vs. agrupadas (média por
+  janela) na configuração atual (JANELA='1h')."
+[POR QUE FOI CORRIGIDA] O clima é HORÁRIO. Com janela de 1h, cada janela contém exatamente UMA
+  leitura climática. Logo, a média da janela = a leitura individual: os dois regimes produzem os
+  MESMOS valores e a comparação é vazia (mede ruído, não granularidade).
+[DECISÃO] A comparação só é significativa quando a janela de agrupamento > resolução do clima.
+  No notebook, o regime AGRUPADO usa `JANELA_AGRUPADO='4h'` (agrega ≥1 leitura horária) e o
+  regime INDIVIDUAL usa a leitura instantânea via merge_asof. Um ÚNICO corte temporal (`CORTE_TS`)
+  é reutilizado entre regimes para isolar o efeito da granularidade.
+[FUNDAMENTAÇÃO] Comparar granularidades exige que elas SEJAM de fato diferentes. A informação só
+  difere entre "instantâneo" e "agregado" quando o intervalo de agregação abrange mais de uma
+  observação. Documentar esse limiar (janela > resolução) é uma contribuição metodológica em si.
+
+C2. (CORREÇÃO VERIFICADA) FEATURES DE JANELA min/max/std SÃO DEGENERADAS COM CLIMA HORÁRIO + 1h
+[HIPÓTESE INICIAL] "Adicionar por janela: min, max, std, range das variáveis climáticas."
+[POR QUE FOI CORRIGIDA] Com clima horário e janela de 1h (uma leitura por janela): std=0,
+  min=max=mean, range=0 — features constantes/degeneradas, sem valor preditivo e potencialmente
+  enganosas.
+[DECISÃO] As agregações VÁLIDAS são: (i) rolling MULTI-HORIZONTE (3h/6h/24h) calculado sobre a
+  série HORÁRIA ANTES do merge/agrupamento — capturando tendência (delta) e volatilidade (std)
+  reais em horizontes que contêm múltiplas observações; e (ii) RAZÕES FÍSICAS entre variáveis
+  (ex.: vento/temperatura). Nada de min/max/std por janela de 1h.
+[FUNDAMENTAÇÃO] Estatística de dispersão exige múltiplas observações no intervalo. O horizonte
+  do rolling é o que garante isso (24 observações em 24h). Assim, "volatilidade das últimas 24h"
+  é informativa, enquanto "std na janela de 1h" é identicamente zero. As razões físicas codificam
+  interações conhecidas do domínio sem depender de agregação temporal.
+
+C3. PROTOCOLO JUSTO — corte temporal fixo, split por timestamp, refit em treino+val (R3, R8)
+[DECISÃO] `preparar_par_ts` faz split por TIMESTAMP fixo (não por índice), reutilizando `CORTE_TS`
+  entre os dois regimes; `treinar_lgbm_par` faz refit em treino+val (mesma lógica do R3 do XAI).
+[FUNDAMENTAÇÃO] Para atribuir a diferença de desempenho à GRANULARIDADE (e não a cortes distintos
+  ou a mais/menos dados de treino), tudo o mais deve ser mantido constante entre os regimes:
+  mesmo corte, mesmo protocolo de treino, mesmas exclusões. É um desenho pareado — a única variável
+  manipulada é a granularidade das features.
+
+C4. PR-AUC ADICIONADA
+[PROBLEMA] O original reportava macro-F1, acurácia e F1 por classe, mas não PR-AUC.
+[EVIDÊNCIA] 05_6, cell-13 (`treinar_lgbm_par` sem PR-AUC).
+[DECISÃO] Reportar `average_precision_score` (PR-AUC) em ambas as análises.
+[FUNDAMENTAÇÃO] Sob desbalanceamento, PR-AUC é mais informativa que ROC-AUC e mais estável que
+  F1 em limiar fixo, pois integra o desempenho sobre TODOS os limiares focando na classe positiva
+  (rara). É a métrica correta para "quão bem o modelo ordena os eventos raros".
+
+C5. ANTI-VAZAMENTO NA ANÁLISE B (variáveis pós-fato de atraso)
+[PROBLEMA] O original admitia (cell-29 markdown) que a F1 da Análise B era "praticamente
+  definicional" e a Análise B (cell-22) NÃO excluía colunas `atraso_*`. Features como
+  `atraso_medio_min`, `atraso_max_min`, `STATUS_ATRASO`, colunas `*_REAL` só existem PORQUE houve
+  atraso — vazamento pós-fato.
+[EVIDÊNCIA] 05_6, cell-22 (`preparar_par(..., cols_excluir=COLS_EXCLUIR_SEMPRE)` — sem atraso_*).
+[DECISÃO] `eh_vazamento_atraso()` exclui `atraso*/status_atraso/*_real/delay/sev_/qtd_voos/voos_`;
+  a Análise B usa SOMENTE variáveis de clima + tempo (nenhuma feature derivada de voo). Isso é mais
+  estrito que "excluir só atraso_*": como o CSV de voos contém APENAS voos atrasados (ver C6),
+  qualquer contagem/composição de voo na janela é pós-fato para prever "houve atraso".
+[FUNDAMENTAÇÃO] Prever "houve atraso" usando "magnitude do atraso" — ou mesmo "quantos voos
+  atrasados houve" — é tautologia. A tarefa cientificamente interessante é prever o atraso a partir
+  de informação disponível ANTES de ele ocorrer (clima, hora). Com a guarda, a F1 cai e passa a
+  MEDIR capacidade preditiva real — resultado mais baixo, porém honesto e defensável.
+
+C6. PARTICIPAÇÃO (SHARE) POR COMPANHIA — RECONSIDERADO À LUZ DO CONTRATO DE PRODUÇÃO
+[HIPÓTESE INICIAL] "Substituir contagens absolutas por companhia por PARTICIPAÇÃO relativa (share),
+  para remover o vazamento de volume."
+[POR QUE FOI RECONSIDERADA] Duas razões tornaram o share inaplicável na prática: (a) na Análise B
+  (atraso), TODAS as features de voo são pós-fato e foram EXCLUÍDAS (C5), então não há contagem nem
+  share de voo entrando no modelo de atraso; (b) na SEÇÃO DE PRODUÇÃO, as features de voo têm de
+  casar exatamente com `_agregar_voos()` do `05_5` (namespace `voos_cia_*`, `voos_orig_*`,
+  `qtd_voos_previstos`, etc.), que usa CONTAGENS — trocar por share criaria train/serve skew.
+[DECISÃO] Manter as CONTAGENS no namespace de produção (compatibilidade com o narrador), e NÃO usar
+  features de voo no modelo de atraso rigoroso (C5). O risco de "vazamento de volume" que o share
+  visava mitigar é neutralizado de forma mais direta: quando as features de voo são pós-fato, elas
+  simplesmente não entram; quando entram (flag `INCLUIR_FEATURES_POSFATO_ATRASO=True`, modo que
+  reproduz o narrador original), assume-se explicitamente o viés e ele é documentado no meta.
+[FUNDAMENTAÇÃO] Uma transformação de feature (share) só se justifica se a feature for usada. O
+  princípio de compatibilidade com o consumidor (05_5) e o princípio anti-vazamento (C5) juntos
+  tornam o share desnecessário. Registrar a hipótese e por que caiu é material metodológico.
+
+C6b. FLAG `INCLUIR_FEATURES_POSFATO_ATRASO` — a tensão central do modelo de atraso
+[PROBLEMA] O CSV `03_voos_atrasados_sbpa.csv` contém SOMENTE voos atrasados. Logo qualquer feature
+  derivada dele (contagem de voos, composição por CIA/origem, severidade, minutos de atraso) só
+  existe PORQUE houve atraso — é pós-fato para o rótulo "houve atraso". O narrador original, porém,
+  ALIMENTA o modelo de atraso com essas features (é o que o `05_5` monta em `construir_features`).
+[DECISÃO] Parametrizar com `INCLUIR_FEATURES_POSFATO_ATRASO` (padrão=False, rigoroso): o modelo de
+  atraso exportado usa só clima+tempo. Com True, reproduz-se o comportamento do narrador original
+  (features de voo incluídas). A escolha é gravada em `modelo_par_atraso_meta.json` (chave
+  `posfato_atraso`), para rastreabilidade total.
+[FUNDAMENTAÇÃO] Em vez de decidir unilateralmente, expomos a decisão como parâmetro AUDITÁVEL. A
+  versão rigorosa é a defensável cientificamente; a versão pós-fato é útil como referência de teto
+  otimista (upper bound) e para compatibilidade com o pipeline existente. Documentar o viés no
+  próprio artefato evita que um modelo vazado seja usado sem que se saiba.
+
+C7. COORDENADAS/DENSIDADE H3 COMO ESPACIAIS; DISTÂNCIA AO AEROPORTO PERMITIDA
+[DECISÃO] `lat/lng/origin_h3/densidade_h3` ficam SEMPRE FORA das features: são identidade
+  espacial e podem vazar o local. A exclusão é INCONDICIONAL, feita por `COLS_ESPACIAIS` dentro de
+  `selecionar_features` (`proibidas = cols_excluir | COLS_META | COLS_ESPACIAIS`) — não depende de
+  nenhuma flag. (Obs.: existe uma variável `COMPUTAR_ESPACIAL=False` na config, mas ela é apenas
+  um marcador de intenção/documentação — NÃO é consultada em nenhuma lógica; alterá-la não muda o
+  conjunto de features. Quem exclui de fato é `COLS_ESPACIAIS`.) Já `dist_aeroporto_km` (distância
+  haversine do H3 de origem ao SBPA) É PERMITIDA quando `USE_DIST=True` — este sim é um flag ativo,
+  consultado em `selecionar_features` —, pois é a mesma feature de CONTEXTO que o motorista tem no
+  app de ride-sharing (e que o `05_5` usa) — não identifica a região, apenas mede proximidade ao
+  aeroporto.
+[FUNDAMENTAÇÃO] Distinguir "identidade espacial" (lat/lng crus, célula H3, densidade — que deixam o
+  modelo MEMORIZAR o ponto) de "contexto espacial derivado" (distância a um ponto de interesse fixo,
+  que é uma grandeza física generalizável). A primeira vaza; a segunda é legítima e operacionalmente
+  disponível. A flag `USE_DIST` deixa a escolha explícita e é gravada no meta (`dist_aeroporto`).
+
+C8. REMOÇÃO DE IMPORT MORTO (`StandardScaler`)
+[PROBLEMA] `from sklearn.preprocessing import StandardScaler` era importado e nunca usado.
+[EVIDÊNCIA] 05_6, cell-2.
+[DECISÃO] Remover o import.
+[FUNDAMENTAÇÃO] Além de higiene de código, sinaliza a decisão correta: modelos baseados em árvore
+  (LightGBM) são invariantes a transformações monotônicas de escala — padronizar features é
+  desnecessário e enganoso (sugere um pré-processamento que não agrega nada em árvores).
+
+C9. LAGS/DIFFS MANTIDOS COMO NaN (não `fillna(0)`)
+[PROBLEMA] O original fazia `Xl = df[feat_lgbm].fillna(0)`, colapsando lags/diffs ausentes em 0.
+[EVIDÊNCIA] 05_6, cell-13 (`.fillna(0)`).
+[DECISÃO] Não preencher lags/diffs com 0; deixar NaN para o LightGBM tratar nativamente.
+[FUNDAMENTAÇÃO] `fillna(0)` inventa um valor (zero) que tem significado numérico real (ex.: delta
+  de temperatura = 0 significa "sem variação", não "desconhecido"). Isso confunde "ausente" com
+  "nulo". O LightGBM aprende uma direção default para NaN no split, preservando a semântica de
+  "faltante" — mais correto do que forçar um valor arbitrário.
+
+================================================================================
+PARTE III-B — CONTRATO DE SAÍDA PARA O NARRADOR (05_5_Narrador_Natural.ipynb)
+================================================================================
+Requisito: os notebooks devem PRODUZIR as saídas que o arquivo de processamento de linguagem
+natural (05_5) consome. Abaixo, o contrato exato implementado (Seção 8 do 05_6 e Seção 13 do 05_XAI).
+
+S1. MODELOS PAREADOS (insumo PRIMÁRIO do 05_5) — exportados pelo 05_6, Seção 8
+[O QUE O 05_5 CARREGA] `joblib.load('modelo_par_clima.joblib')` e `modelo_par_atraso.joblib`, e lê
+  `*_meta.json` esperando as chaves: `janela`, `dist_aeroporto`, `features_lgbm`, `macro_f1_bal`,
+  `macro_f1_nat`. Na inferência ele reconstrói features com `construir_features(ts, h3_cell)` e
+  seleciona `features_lgbm` (preenchendo com 0 o que faltar) em `_preparar_X`.
+[O QUE EXPORTAMOS] Dois `LGBMClassifier` binários (CLIMA vs OUTROS; ATRASO vs OUTROS), treinados
+  com o protocolo rigoroso (split por timestamp + refit em treino, R3/R8), na JANELA DE PRODUÇÃO
+  de 1h, com features NUMÉRICAS cujos nomes pertencem ao namespace do `construir_features` do 05_5.
+  Cada `*_meta.json` traz TODAS as chaves esperadas, mais extras auditáveis (`pr_auc`,
+  `best_iteration`, `posfato_atraso`, `obs`).
+[GARANTIA DE COMPATIBILIDADE] A célula final da Seção 8 valida `features_lgbm ⊆ NAMESPACE_NARRADOR`
+  e ALERTA se alguma feature exportada não for gerada pelo `construir_features` (o 05_5 a zeraria →
+  train/serve skew). Por isso a produção NÃO usa o enriquecimento multi-horizonte (rolling 3h/6h/24h)
+  do ESTUDO: esses nomes não existem no 05_5. A produção usa apenas: clima cru agregado por 1h +
+  `{c}_lag`/`diff_{c}` das 4 variáveis do contrato + voos por `_agregar_voos` (idêntico ao 05_5) +
+  temporais numéricas + sin/cos + `dist_aeroporto_km` (se `USE_DIST`).
+[SOBRE macro_f1_bal E macro_f1_nat] Ambas são preenchidas; como o teste é balanceado por bucket (L2),
+  não há conjunto "natural" — gravamos `macro_f1_nat = macro_f1_bal` com `obs` explicando. Isso é
+  honesto (o 05_5 apenas exibe as métricas) e evita fabricar um número populacional inexistente.
+
+S2. BUNDLE DE EXPLICAÇÃO GLOBAL (insumo COMPLEMENTAR) — exportado pelo 05_XAI, Seção 13
+[O QUE EXPORTAMOS] `xai_explicacao_bundle.json` com: `janela`, `classes`, `features_lgbm`,
+  `macro_f1_test`, `pr_auc_por_classe`, `importancias_shap_por_classe` (top-15 por classe com nome
+  técnico, ROTULO legível em PT alinhado ao `_label_feature` do 05_5, e |SHAP| médio) e
+  `frac_empates_descartados`. Além dos modelos `.joblib`.
+[PARA QUE SERVE] O narrador pode citar as features mais influentes por regime ("a previsão de
+  severidade climática foi puxada sobretudo por umidade relativa e temperatura") de forma
+  fundamentada, no nível MACRO/multiclasse — complementando as explicações locais dos modelos
+  pareados. Fica explícito no `obs` do bundle que o insumo PRIMÁRIO do 05_5 são os modelos do 05_6.
+
+================================================================================
+PARTE IV — LIMITAÇÕES E RESSALVAS REMANESCENTES (para declarar na tese)
+================================================================================
+L1. PRIORS ARTIFICIAIS (1:1:1). A amostragem balanceada facilita o treino e a comparação pareada,
+    mas destrói os priors reais (<1% de eventos). Consequência: as probabilidades previstas e as
+    métricas de teste NÃO são populacionais. Para inferência em escala real, aplicar correção de
+    prior shift (reponderar pela razão priors_reais/priors_treino) e reavaliar em amostra com a
+    distribuição natural.
+L2. TESTE "NATURAL" NÃO É DESBALANCEADO. Como a query equaliza classes por bucket, mesmo o conjunto
+    de teste está balanceado — logo não mede desempenho sob a raridade real. Uma avaliação
+    populacional exigiria um conjunto de teste com a proporção natural (sem reamostrar DS_OUTROS).
+L3. AUSÊNCIA DE EXECUÇÃO. Os números só existirão após rodar no Colab com os dados reais; nomes de
+    colunas físicas (temperatura/vento/etc.) e caminhos GCS trazem marcadores "<-- ajuste".
+L4. CALIBRAÇÃO vs. PRIOR SHIFT. A calibração isotônica corrige a FORMA da curva, mas não o NÍVEL
+    imposto pelo prior artificial (ver L1). São correções complementares.
+L5. ESCOPO DA COMPARAÇÃO DE GRANULARIDADE. Ela é limpa para o CLIMA (Análise A). Para o ATRASO
+    (Análise B), as features de voo não têm análogo "instantâneo vs. agregado" de clima; por isso
+    a Análise B é reportada só no regime agrupado, com a guarda anti-vazamento.
+
+================================================================================
+PARTE V — MAPA DE RASTREABILIDADE (célula original -> mudança)
+================================================================================
+05_XAI.ipynb (original)                  ->  05_XAI_OTIMIZADO.ipynb
+  cell-10/13 (SAMPLE 30% + query 2x)     ->  Seção 1 (query única + amostragem no DuckDB)      V1,V2
+  cell-15 (undersample em memória)       ->  Seção 1 (balanceamento no SQL)                    V2
+  cell-21 (lista_* + agg)                ->  Seção 2 (só contagens; float32)                   V3,V4
+  cell-23 (temporais como int)           ->  Seção 2/3 (categóricas nativas)                   V5
+  cell-25 (sem excluir UTCI; ffill+bfill)->  Seção 3 (eh_score_composto) + Seção 4 (ffill/part) R1,R5
+  cell-26 (split por índice)             ->  Seção 4 (split por timestamp)                     R8
+  cell-27 (pesos manuais *0.5/*1.5)      ->  Seção 5 (class_weight='balanced' aplicado)        R2
+  cell-29/31 (n_estimators 400/600/800)  ->  Seções 6-8 (teto único 3000)                      R10
+  cell-31 (Optuna sem seed/pruner;       ->  Seção 7 (TPESampler seed + MedianPruner +          R4,R7,
+           score no mesmo X_val;              LightGBMPruningCallback; minimize log-loss em SEL) V6,R11
+           maximize + pruning invertido)
+  (alvo argmax sobre TODAS as janelas)   ->  Seção 3 (só janelas c/ evento, sem empates)       R12
+  cell-32 (fit só em X_tr)               ->  Seção 8 (refit em trainval, best_iteration)       R3
+  cell-40 (recompute predict_proba)      ->  Seção 9/11 (reuso de proba; guarda SHAP 3D/lista) V8,V9
+  cell-42/43 (curva plotada; modelo cru; ->  Seção 12 (CalibratedClassifierCV cv=TimeSeriesSplit R6
+           prefit descasado)                  sobre TRAINVAL + persistência)
+  (ausente)                              ->  Seção 9 (PR-AUC) + Seção 10 (TimeSeriesSplit)      C4,R9
+  (ausente)                              ->  Seção 13 (bundle de explicação p/ 05_5)            S2
+
+05_6 (original)                          ->  05_6_FeatureEng_Individual_vs_Agrupado.ipynb
+  cell-2 (StandardScaler morto)          ->  Seção 1 (removido)                                C8
+  cell-4 (JANELA='1h')                   ->  Seção 1 (estudo=4h; produção=1h; flags)           C1,C7
+  cell-11 (agg; sem multi-horizonte)     ->  Seção 3 (rolling 3h/6h/24h + razões físicas)      C2
+  cell-13 (fillna(0); sem PR-AUC;        ->  Seção 4 (NaN nativo; PR-AUC; split por ts;         C9,C4,
+           split por índice; sem refit)       refit em treino+val)                             C3
+  (regime agrupado por janela, sem       ->  Seção 3-4 (AMBOS regimes em nível de evento,       (bug
+   dataset_type -> KeyError)                  com dataset_type e request_dt)                    corrig.)
+  cell-22 (Análise B sem excluir atraso_*)-> Seção 6 (eh_vazamento_atraso: exclui todo voo)    C5
+  (contagens absolutas por CIA)          ->  Seção 8 (contagens compat. 05_5; share caiu)      C6
+  (ausente)                              ->  Seção 8 (2 modelos pareados + meta p/ 05_5)        S1,C6b
+
+================================================================================
+FIM
+================================================================================

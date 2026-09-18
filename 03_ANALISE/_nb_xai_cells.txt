@@ -1,0 +1,571 @@
+%%CELL markdown
+# 05_XAI — Versão OTIMIZADA e com rigor metodológico reforçado
+
+**Reescrita do `05_XAI.ipynb` original.** Preserva o objetivo (classificação multiclasse
+dos três regimes — `DS_VOO` (atraso), `DS_CLIMA` (severidade climática) e `DS_OUTROS` —
+com explicabilidade via SHAP) e aplica correções de **velocidade** e **rigor** levantadas
+e verificadas adversarialmente. A fundamentação completa está em
+`JUSTIFICATIVAS_OTIMIZACAO_LGBM.txt`.
+
+> Escrito para Colab (GCS + Drive). **Não executado aqui.** Ajuste caminhos/credenciais.
+
+## Sumário das mudanças (rastreável)
+
+**Velocidade**
+1. **Query única** (o original rodava a query duas vezes).
+2. **Amostragem estratificada no DuckDB** (evita materializar ~60M linhas / OOM).
+3. **Sem agregações `lista_*`** descartadas.
+4. **`float32`** nas contínuas.
+5. **Categóricas nativas** (`hora/mes/dia_semana/trimestre` como `category`, auto-detectadas
+   pelo LightGBM — sem passar `categorical_feature` manualmente em cada `fit`).
+6. **Optuna com pruning** (`MedianPruner` + `LightGBMPruningCallback`), agora **consistente**
+   com a direção do estudo (ver R4/R11).
+7. **SHAP sem recomputação redundante.**
+
+**Rigor**
+- **R1 (crítico) — vazamento cross-notebook:** exclui os escores compostos de UTCI (que
+  definiram a classe `DS_CLIMA`) via `eh_score_composto()`.
+- **R2 — pesos de classe principiados:** o original multiplicava `balanced` por `0.5/1.5`
+  arbitrários. Como o alvo por janela **não** é 1:1:1 (ver R12), aplicamos
+  `class_weight='balanced'` **sem** fatores manuais, calculado na distribuição real de treino.
+- **R3 — refit final** em treino+validação com `best_iteration` fixo.
+- **R4 — seleção ≠ early stopping:** Optuna ajusta em FIT, para em EARLY, e **seleciona por
+  log-loss em SEL** (fatia independente).
+- **R5 — sem `bfill`:** preenchimento após o split, por partição.
+- **R6 — calibração aplicada** e consistente (`CalibratedClassifierCV` com `TimeSeriesSplit`
+  sobre o TRAINVAL — mesma base do modelo final, sem descasamento `prefit`).
+- **R7 — Optuna determinístico** (`TPESampler(seed)`).
+- **R8 — split por timestamp** (quantil temporal).
+- **R9 — robustez temporal** (`TimeSeriesSplit`, média ± desvio).
+- **R10 — `n_estimators`** teto único + early stopping.
+- **R11 (novo) — direção de pruning consistente:** o estudo agora **minimiza log-loss**
+  (regra de pontuação própria), coerente com o `LightGBMPruningCallback('multi_logloss')`.
+  No original havia `direction='maximize'` (macro-F1) + pruning por logloss → pruning
+  invertido, cortava bons trials. Reportamos a macro-F1 do melhor trial à parte.
+- **R12 (novo) — alvo bem definido:** só janelas com **≥1 evento** entram; empates exatos
+  de contagem são **descartados** (fração reportada). Evita fabricar `DS_OUTROS` em janelas
+  vazias (o `argmax` de zeros retornava 0 silenciosamente).
+
+## Saída para o Narrador (05_5)
+Os insumos primários do `05_5_Narrador_Natural.ipynb` são os **modelos binários pareados**
+exportados pelo `05_6`. Este notebook exporta, adicionalmente, um **bundle de explicação
+global** (`xai_explicacao_bundle.json`) — importâncias SHAP por classe com rótulos legíveis
+em PT — que o narrador pode citar para justificar previsões no nível macro (multiclasse).
+
+%%CELL code
+# ============================================================
+# (Opcional) Sincroniza o repositório — ajuste ou remova.
+# ============================================================
+import os
+REPO_DIR = '/content/DOUTORADO'
+# if not os.path.exists(REPO_DIR):
+#     !git clone <URL_DO_SEU_REPO> {REPO_DIR}
+# %cd {REPO_DIR}/03_ANALISE
+
+%%CELL code
+# ============================================================
+# Dependências + imports + credenciais (consolidado)
+# ============================================================
+# !pip -q install duckdb lightgbm optuna optuna-integration shap gcsfs scikit-learn pandas pyarrow
+
+import numpy as np
+import pandas as pd
+import duckdb
+import lightgbm as lgb
+from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+import shap
+import optuna
+# optuna-integration mudou de namespace entre versões: tenta ambos (corrige ImportError).
+try:
+    from optuna.integration import LightGBMPruningCallback
+except Exception:
+    from optuna_integration import LightGBMPruningCallback
+import matplotlib.pyplot as plt
+import joblib, json
+from sklearn.metrics import (classification_report, confusion_matrix,
+                             f1_score, average_precision_score, log_loss)
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.utils.class_weight import compute_class_weight
+
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+# --- GCS (Colab) ---
+# from google.colab import auth; auth.authenticate_user()
+import gcsfs
+GCS_PROJECT = 'seu-projeto-gcp'      # <-- ajuste
+GCS_BUCKET  = 'seu-bucket'           # <-- ajuste
+fs = gcsfs.GCSFileSystem(project=GCS_PROJECT)
+
+# --- Drive ---
+# from google.colab import drive; drive.mount('/content/drive')
+DRIVE_BASE = '/content/drive/MyDrive/DOUTORADO'
+
+print('Ambiente pronto. LightGBM', lgb.__version__, '| Optuna', optuna.__version__)
+
+%%CELL markdown
+## 1. Carga eficiente dos dados (Velocidade #1, #2)
+
+Amostragem estratificada balanceada **dentro do DuckDB** (bucket temporal × classe), em
+**uma única** execução. `setseed` é **materializado** com `.fetchall()` numa conexão
+persistente — senão a relação lazy não executa o seed e o `RANDOM()` fica não determinístico.
+
+%%CELL code
+GCS_GLOB = f'{GCS_BUCKET}/caminho/para/eventos/*/*.parquet'   # <-- ajuste
+arquivos = [f'gs://{a}' for a in fs.glob(GCS_GLOB)]
+print(f'{len(arquivos)} arquivos Parquet encontrados.')
+files_sql_array = ", ".join([f"'{a}'" for a in arquivos])
+
+%%CELL code
+# ------------------------------------------------------------
+# Amostragem estratificada balanceada (bucket temporal x classe)
+# ------------------------------------------------------------
+inicio_ts, fim_ts = 1735699200, 1767235200   # 2025-01-01 .. 2026-01-01
+N_BUCKETS  = 100
+POR_BUCKET = 2000       # linhas por classe por bucket
+
+con = duckdb.connect()
+con.execute("INSTALL httpfs; LOAD httpfs;")          # leitura gs:// explícita
+con.execute("SELECT setseed(0.42)").fetchall()       # materializa o seed (reprodutível)
+
+query_amostra = f"""
+WITH base AS (
+    SELECT request_ts, event_name, origin_h3,
+        CASE
+            WHEN UPPER(event_name) LIKE '%ATRASADO%'   THEN 'DS_VOO'
+            WHEN UPPER(event_name) LIKE '%SEVERIDADE%' THEN 'DS_CLIMA'
+            WHEN event_name IS NULL                    THEN 'NULO'
+            ELSE 'DS_OUTROS'
+        END AS dataset_type,
+        LEAST({N_BUCKETS - 1},
+              CAST((request_ts - {inicio_ts}) * {N_BUCKETS}.0
+                   / ({fim_ts} - {inicio_ts}) AS INTEGER)) AS bucket
+    FROM read_parquet([{files_sql_array}], hive_partitioning=true)
+    WHERE request_ts >= {inicio_ts} AND request_ts < {fim_ts}
+),
+ranked AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY dataset_type, bucket
+                                 ORDER BY RANDOM()) AS rn
+    FROM base WHERE dataset_type <> 'NULO'
+)
+SELECT request_ts, event_name, origin_h3, dataset_type
+FROM ranked WHERE rn <= {POR_BUCKET}
+"""
+
+df_combined = con.execute(query_amostra).df()        # UMA execução (Velocidade #1)
+print('Amostra materializada:', df_combined.shape)
+print(df_combined['dataset_type'].value_counts())
+
+DS_VOO    = df_combined[df_combined['dataset_type'] == 'DS_VOO'].copy()
+DS_CLIMA  = df_combined[df_combined['dataset_type'] == 'DS_CLIMA'].copy()
+DS_OUTROS = df_combined[df_combined['dataset_type'] == 'DS_OUTROS'].copy()
+
+%%CELL code
+# ------------------------------------------------------------
+# CSVs auxiliares (Drive) — clima horário UTCI e voos atrasados
+# ------------------------------------------------------------
+df_clima = pd.read_csv(f'{DRIVE_BASE}/dados_meteorologicos_utci_horario.csv')
+df_voos  = pd.read_csv(f'{DRIVE_BASE}/03_voos_atrasados_sbpa.csv', sep=';')
+
+df_clima['time'] = pd.to_datetime(df_clima['time'], utc=True, errors='coerce')
+for _df in (DS_VOO, DS_CLIMA, DS_OUTROS):
+    _df['request_dt'] = pd.to_datetime(_df['request_ts'], unit='s', utc=True)
+
+print('Clima:', df_clima.shape, '| Voos:', df_voos.shape)
+
+%%CELL markdown
+## 2. Base Master (Velocidade #3, #4)
+
+Base agregada por **janela de 4h** (> resolução horária do clima → agrega ≥1 leitura;
+ver `05_6`). Sem `lista_*`; `float32`; lags por `shift(1)` (defasagem de 1 janela = 4h).
+
+%%CELL code
+JANELA = '4h'
+
+df_clima = df_clima.sort_values('time')
+df_clima['time_window'] = df_clima['time'].dt.floor(JANELA)
+df_clima_agg = (df_clima.drop(columns=['time']).groupby('time_window')
+                        .mean(numeric_only=True))
+
+def _contagem_por_janela(df, nome):
+    if len(df) == 0:
+        return pd.DataFrame(columns=[nome]).rename_axis('time_window')
+    g = df.copy(); g['time_window'] = g['request_dt'].dt.floor(JANELA)
+    return g.groupby('time_window').size().rename(nome).to_frame()
+
+cnt_voo    = _contagem_por_janela(DS_VOO,   'qtd_voo')
+cnt_clima  = _contagem_por_janela(DS_CLIMA, 'qtd_clima')
+cnt_outros = _contagem_por_janela(DS_OUTROS,'qtd_outros')
+
+df_master = (df_clima_agg.join(cnt_voo, how='left')
+                         .join(cnt_clima, how='left')
+                         .join(cnt_outros, how='left'))
+df_master[['qtd_voo','qtd_clima','qtd_outros']] = \
+    df_master[['qtd_voo','qtd_clima','qtd_outros']].fillna(0)
+df_master = df_master.reset_index().sort_values('time_window').reset_index(drop=True)
+print('Base master (todas as janelas de clima):', df_master.shape)
+
+%%CELL code
+# ---- Features temporais (categóricas) + lags climáticos ----
+tw = df_master['time_window'].dt
+df_master['hora']       = tw.hour.astype('category')
+df_master['mes']        = tw.month.astype('category')
+df_master['dia_semana'] = tw.dayofweek.astype('category')
+df_master['trimestre']  = tw.quarter.astype('category')
+
+cols_clima_num = df_clima_agg.columns.tolist()
+for c in cols_clima_num:
+    if c in df_master.columns:
+        df_master[f'{c}_lag4h'] = df_master[c].shift(1)   # causal (1 janela = 4h)
+
+%%CELL markdown
+## 3. Alvo e seleção de features (R1, R12)
+
+**R1 — vazamento de rótulo (crítico).** Os eventos `DS_CLIMA` derivam dos escores compostos
+de UTCI; se essas colunas entram como features, o modelo "prevê" a classe pela própria régua
+que a definiu. `eh_score_composto()` as exclui (inclusive `_lag4h`).
+
+**R12 — alvo bem definido.** Só janelas com **≥1 evento** entram (senão `argmax` de zeros
+fabricaria `DS_OUTROS`). Empates exatos de contagem são **descartados** (fração reportada).
+
+%%CELL code
+def eh_score_composto(col: str) -> bool:
+    """Colunas que são escores/índices compostos de UTCI ou flags de stress térmico —
+    as MESMAS variáveis a partir das quais os eventos DS_CLIMA foram rotulados."""
+    c = col.lower()
+    return any(p in c for p in ('utci', 'discomfort', 'stress', 'score', 'severidade',
+                                'thermal', 'conforto', 'desconforto'))
+
+# R12: filtra janelas sem evento e resolve empates ANTES de definir o alvo
+cont_cols = ['qtd_outros', 'qtd_clima', 'qtd_voo']
+n_antes = len(df_master)
+tem_evento = df_master[cont_cols].sum(axis=1) > 0
+df_master = df_master[tem_evento].reset_index(drop=True)
+cont = df_master[cont_cols].values
+ordenado = np.sort(cont, axis=1)
+empate = ordenado[:, -1] == ordenado[:, -2]        # 1º == 2º maior -> empate no topo
+frac_empate = float(empate.mean())
+df_master = df_master[~empate].reset_index(drop=True)
+df_master['y'] = df_master[cont_cols].values.argmax(axis=1)   # 0=OUTROS,1=CLIMA,2=VOO
+print(f'Janelas: {n_antes} -> {tem_evento.sum()} com evento -> '
+      f'{len(df_master)} sem empate ({frac_empate:.1%} de empates descartados)')
+print('Distribuição REAL do alvo por janela:'); print(df_master['y'].value_counts().sort_index())
+
+# Colunas que NUNCA são features
+cols_meta      = ['time_window', 'y']
+cols_contagem  = cont_cols                                   # definem o alvo -> vazam
+cols_vazamento = [c for c in df_master.columns if eh_score_composto(c)]   # R1
+print(f'R1: {len(cols_vazamento)} colunas de escore composto excluídas ->', cols_vazamento[:8])
+
+cols_bloqueadas = set(cols_meta + cols_contagem + cols_vazamento)
+FEATURES = [c for c in df_master.columns if c not in cols_bloqueadas]
+CAT_FEATURES = [c for c in ['hora', 'mes', 'dia_semana', 'trimestre'] if c in FEATURES]
+NUM_FEATURES = [c for c in FEATURES if c not in CAT_FEATURES]
+df_master[NUM_FEATURES] = df_master[NUM_FEATURES].astype('float32')   # Velocidade #4
+print(f'{len(FEATURES)} features ({len(CAT_FEATURES)} categóricas, {len(NUM_FEATURES)} numéricas)')
+
+%%CELL markdown
+## 4. Validação temporal (R5, R8)
+
+**R8** corte por quantil temporal de `time_window`. **R5** `ffill` **após** o split e **por
+partição**, nunca `bfill`. Fatias: TEST (últimos 20%); TRAINVAL (80%) → FIT (0–65%),
+EARLY (65–80%, early stopping), SEL (80–100%, seleção do Optuna — R4).
+
+%%CELL code
+df_master = df_master.sort_values('time_window').reset_index(drop=True)
+t = df_master['time_window']
+corte_test = t.quantile(0.80)
+trainval = df_master[t <  corte_test].reset_index(drop=True)
+test     = df_master[t >= corte_test].reset_index(drop=True)
+
+tv = trainval['time_window']
+c_fit, c_early = tv.quantile(0.65), tv.quantile(0.80)
+fit_df   = trainval[tv <  c_fit]
+early_df = trainval[(tv >= c_fit) & (tv < c_early)]
+sel_df   = trainval[tv >= c_early]
+
+def _xy(d):
+    return d[FEATURES].copy(), d['y'].values
+
+X_fit,   y_fit   = _xy(fit_df)
+X_early, y_early = _xy(early_df)
+X_sel,   y_sel   = _xy(sel_df)
+X_trainval, y_trainval = _xy(trainval)
+X_test,  y_test  = _xy(test)
+
+for _X in (X_fit, X_early, X_sel, X_trainval, X_test):   # R5: ffill por partição, sem bfill
+    _X[NUM_FEATURES] = _X[NUM_FEATURES].ffill()
+    for c in CAT_FEATURES:
+        _X[c] = _X[c].astype('category')   # dtype 'category' -> LightGBM auto-detecta (Vel. #5)
+
+print('FIT', X_fit.shape, '| EARLY', X_early.shape, '| SEL', X_sel.shape, '| TEST', X_test.shape)
+
+%%CELL markdown
+## 5. Pesos de classe (R2)
+
+O original multiplicava `balanced` por `0.5/1.5` arbitrários. Como o alvo por janela **não**
+é 1:1:1 (R12), aplicamos `class_weight='balanced'` **sem** fatores manuais, computado na
+distribuição real de treino. É passado ao LightGBM via `class_weight` (mapa por classe).
+
+%%CELL code
+classes = np.unique(y_trainval)
+cw = compute_class_weight('balanced', classes=classes, y=y_trainval)
+CLASS_WEIGHT = {int(k): float(v) for k, v in zip(classes, cw)}   # R2: aplicado de fato
+print('class_weight balanced (APLICADO):', {k: round(v, 3) for k, v in CLASS_WEIGHT.items()})
+
+%%CELL markdown
+## 6. Baseline (R10)
+
+Teto único de `n_estimators` (R10) + early stopping. Categóricas auto-detectadas pelo dtype
+`category` (Velocidade #5). `class_weight` principiado (R2).
+
+%%CELL code
+N_ESTIMATORS_TETO = 3000
+
+baseline = LGBMClassifier(
+    objective='multiclass', num_class=3, class_weight=CLASS_WEIGHT,
+    n_estimators=N_ESTIMATORS_TETO, learning_rate=0.05, num_leaves=63,
+    subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+    random_state=RANDOM_STATE, n_jobs=-1, verbose=-1)
+baseline.fit(X_fit, y_fit, eval_set=[(X_early, y_early)], eval_metric='multi_logloss',
+             callbacks=[early_stopping(50), log_evaluation(0)])
+print('Baseline best_iteration:', baseline.best_iteration_)
+print(classification_report(y_test, baseline.predict(X_test), digits=3,
+                            labels=[0, 1, 2], target_names=['OUTROS', 'CLIMA', 'VOO']))
+
+%%CELL markdown
+## 7. Otimização com Optuna (R4, R7, R11, Velocidade #6)
+
+- **R7** `TPESampler(seed)`. **Velocidade #6** `MedianPruner` + `LightGBMPruningCallback`.
+- **R11 — consistência de direção:** o estudo **minimiza log-loss** (regra de pontuação
+  própria), coerente com o pruning por `multi_logloss` (menor = melhor). O original
+  maximizava macro-F1 com pruning por logloss → pruning invertido.
+- **R4 — seleção ≠ early stopping:** ajusta em FIT, para em EARLY, e **seleciona por log-loss
+  em SEL** (fatia independente). Reportamos a macro-F1 do melhor trial à parte.
+
+%%CELL code
+def objective(trial):
+    params = dict(
+        objective='multiclass', num_class=3, class_weight=CLASS_WEIGHT,
+        n_estimators=N_ESTIMATORS_TETO,
+        learning_rate=trial.suggest_float('learning_rate', 0.01, 0.15, log=True),
+        num_leaves=trial.suggest_int('num_leaves', 15, 255),
+        max_depth=trial.suggest_int('max_depth', 3, 12),
+        min_child_samples=trial.suggest_int('min_child_samples', 10, 200),
+        subsample=trial.suggest_float('subsample', 0.6, 1.0), subsample_freq=1,
+        colsample_bytree=trial.suggest_float('colsample_bytree', 0.6, 1.0),
+        reg_alpha=trial.suggest_float('reg_alpha', 1e-3, 10.0, log=True),
+        reg_lambda=trial.suggest_float('reg_lambda', 1e-3, 10.0, log=True),
+        random_state=RANDOM_STATE, n_jobs=-1, verbose=-1)
+    model = LGBMClassifier(**params)
+    model.fit(X_fit, y_fit, eval_set=[(X_early, y_early)], eval_metric='multi_logloss',
+              callbacks=[early_stopping(50),
+                         LightGBMPruningCallback(trial, 'multi_logloss')])
+    # R4 + R11: seleção por log-loss em SEL (fatia independente; menor = melhor)
+    proba_sel = model.predict_proba(X_sel)
+    trial.set_user_attr('macro_f1_sel', f1_score(y_sel, np.argmax(proba_sel, 1), average='macro'))
+    return log_loss(y_sel, proba_sel, labels=[0, 1, 2])
+
+sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)          # R7
+pruner  = optuna.pruners.MedianPruner(n_warmup_steps=50)         # Velocidade #6
+study = optuna.create_study(direction='minimize', sampler=sampler, pruner=pruner)  # R11
+study.optimize(objective, n_trials=40, show_progress_bar=True)
+
+print('Melhor log-loss (SEL):', round(study.best_value, 4),
+      '| macro-F1 do melhor trial:', round(study.best_trial.user_attrs['macro_f1_sel'], 4))
+best_params = dict(objective='multiclass', num_class=3, class_weight=CLASS_WEIGHT,
+                   n_estimators=N_ESTIMATORS_TETO, subsample_freq=1,
+                   random_state=RANDOM_STATE, n_jobs=-1, verbose=-1, **study.best_params)
+
+%%CELL markdown
+## 8. Modelo final: refit em treino+validação (R3)
+
+1) `best_iteration` ajustando `best_params` em FIT com early stopping em EARLY; 2) refit em
+**todo o TRAINVAL** com `n_estimators = best_iteration` fixo, sem early stopping.
+
+%%CELL code
+probe = LGBMClassifier(**best_params)
+probe.fit(X_fit, y_fit, eval_set=[(X_early, y_early)], eval_metric='multi_logloss',
+          callbacks=[early_stopping(50), log_evaluation(0)])
+best_iter = int(probe.best_iteration_ or N_ESTIMATORS_TETO)
+print('best_iteration =', best_iter)
+
+final_params = {**best_params, 'n_estimators': best_iter}
+final_model = LGBMClassifier(**final_params)
+final_model.fit(X_trainval, y_trainval)   # R3
+
+%%CELL markdown
+## 9. Avaliação no TEST (com PR-AUC)
+
+%%CELL code
+proba_test = final_model.predict_proba(X_test)   # calculado UMA vez (Velocidade #7)
+pred_test  = np.argmax(proba_test, axis=1)
+print(classification_report(y_test, pred_test, digits=3,
+                            labels=[0, 1, 2], target_names=['OUTROS','CLIMA','VOO']))
+for k, nome in enumerate(['OUTROS', 'CLIMA', 'VOO']):
+    ap = average_precision_score((y_test == k).astype(int), proba_test[:, k])
+    print(f'PR-AUC[{nome}] = {ap:.4f}')
+
+# labels=[0,1,2] força a matriz 3x3 mesmo se alguma classe faltar na fatia TEST
+cm = confusion_matrix(y_test, pred_test, labels=[0, 1, 2])
+fig, ax = plt.subplots(figsize=(4.5, 4)); ax.imshow(cm, cmap='Blues')
+ax.set_xticks(range(3)); ax.set_yticks(range(3))
+ax.set_xticklabels(['OUTROS','CLIMA','VOO']); ax.set_yticklabels(['OUTROS','CLIMA','VOO'])
+for i in range(3):
+    for j in range(3):
+        ax.text(j, i, cm[i, j], ha='center', va='center')
+ax.set_xlabel('Predito'); ax.set_ylabel('Real'); ax.set_title('Matriz de confusão (TEST)')
+plt.tight_layout(); plt.show()
+
+%%CELL markdown
+## 10. Robustez temporal — TimeSeriesSplit (R9)
+
+%%CELL code
+tscv = TimeSeriesSplit(n_splits=5)
+scores = []
+Xtv = X_trainval.reset_index(drop=True); ytv = pd.Series(y_trainval).reset_index(drop=True)
+for tr_idx, va_idx in tscv.split(Xtv):
+    m = LGBMClassifier(**final_params)
+    m.fit(Xtv.iloc[tr_idx], ytv.iloc[tr_idx])
+    scores.append(f1_score(ytv.iloc[va_idx], m.predict(Xtv.iloc[va_idx]), average='macro'))
+scores = np.array(scores)
+print(f'macro-F1 TimeSeriesSplit: {scores.mean():.4f} ± {scores.std():.4f}')
+print('por fold:', np.round(scores, 4))
+
+%%CELL markdown
+## 11. Explicabilidade — SHAP (Velocidade #7)
+
+`TreeExplainer` sobre amostra do TEST. Guarda para a forma do retorno multiclasse: versões
+recentes do SHAP retornam um **ndarray 3D** `(n, features, classes)`; versões antigas, uma
+**lista** de matrizes. `_shap_por_classe`/`_shap_lista` normalizam ambos.
+
+%%CELL code
+def _shap_lista(sv, n_classes):
+    """Normaliza o retorno do SHAP para uma LISTA [classe -> matriz (n, features)]."""
+    if isinstance(sv, list):
+        return sv
+    if getattr(sv, 'ndim', 2) == 3:      # (n, features, classes)
+        return [sv[:, :, k] for k in range(sv.shape[-1])]
+    return [sv]                          # binário/degenerado
+
+def _shap_por_classe(sv, k):
+    return _shap_lista(sv, None)[k]
+
+n_shap = min(5000, len(X_test))
+X_shap = X_test.iloc[:n_shap].copy()
+explainer = shap.TreeExplainer(final_model)
+shap_values = explainer.shap_values(X_shap)
+sv_lista = _shap_lista(shap_values, 3)
+
+shap.summary_plot(sv_lista, X_shap, plot_type='bar',
+                  class_names=['OUTROS','CLIMA','VOO'], show=True)
+
+%%CELL code
+# Beeswarm da classe CLIMA (índice 1) — relações livres de vazamento (R1)
+shap.summary_plot(_shap_por_classe(shap_values, 1), X_shap, show=True)
+
+%%CELL code
+# Dependence plot da feature mais importante da classe CLIMA
+sv_clima = _shap_por_classe(shap_values, 1)
+imp = np.abs(sv_clima).mean(axis=0)
+top_feat = X_shap.columns[int(np.argmax(imp))]
+shap.dependence_plot(top_feat, sv_clima, X_shap, show=True)
+
+%%CELL code
+# Waterfall local para um exemplo do TEST
+i_local = min(10, len(X_test) - 1)
+exemplo = X_test.iloc[[i_local]]
+sv_local = _shap_lista(explainer.shap_values(exemplo), 3)
+classe_prevista = int(np.argmax(final_model.predict_proba(exemplo), axis=1)[0])
+ev = explainer.expected_value
+ev_k = ev[classe_prevista] if np.ndim(ev) > 0 else ev
+shap.plots._waterfall.waterfall_legacy(
+    ev_k, sv_local[classe_prevista][0],
+    feature_names=exemplo.columns.tolist(), show=True)
+print('Classe prevista para o exemplo:', ['OUTROS','CLIMA','VOO'][classe_prevista])
+
+%%CELL markdown
+## 12. Calibração e persistência (R6)
+
+Calibração **consistente**: `CalibratedClassifierCV` com `TimeSeriesSplit` sobre o
+**TRAINVAL** (mesma base do modelo final — sem descasamento `prefit`/base-só-em-FIT do
+original). Categóricas auto-detectadas pelo dtype `category`.
+
+> **Ressalva (no .txt):** as probabilidades refletem o *prior* de treino, não a frequência
+> populacional (<1%). A calibração corrige a *forma*; escala populacional exige correção de
+> *prior shift*.
+
+%%CELL code
+# Curva ANTES (classe CLIMA)
+frac_pos, mean_pred = calibration_curve((y_test == 1).astype(int), proba_test[:, 1], n_bins=10)
+plt.figure(figsize=(4.5, 4)); plt.plot([0,1],[0,1],'--',color='gray')
+plt.plot(mean_pred, frac_pos, marker='o', label='CLIMA (não calibrado)')
+plt.xlabel('Prob. prevista'); plt.ylabel('Fração observada')
+plt.title('Calibração — antes'); plt.legend(); plt.tight_layout(); plt.show()
+
+# R6: calibração via CV temporal sobre TRAINVAL (consistente com o modelo final)
+modelo_calibrado = CalibratedClassifierCV(
+    LGBMClassifier(**final_params), method='isotonic', cv=TimeSeriesSplit(3))
+modelo_calibrado.fit(X_trainval, y_trainval)
+
+proba_cal = modelo_calibrado.predict_proba(X_test)
+frac_c, mean_c = calibration_curve((y_test == 1).astype(int), proba_cal[:, 1], n_bins=10)
+plt.figure(figsize=(4.5, 4)); plt.plot([0,1],[0,1],'--',color='gray')
+plt.plot(mean_c, frac_c, marker='o', color='green', label='CLIMA (calibrado)')
+plt.xlabel('Prob. prevista'); plt.ylabel('Fração observada')
+plt.title('Calibração — depois'); plt.legend(); plt.tight_layout(); plt.show()
+
+%%CELL markdown
+## 13. Exportação para o Narrador (05_5) — bundle de explicação global
+
+Salva os modelos + um `xai_explicacao_bundle.json` com as **importâncias SHAP médias por
+classe** e **rótulos legíveis em PT**, que o `05_5` pode citar para justificar previsões no
+nível multiclasse. (Os insumos primários do narrador são os modelos pareados do `05_6`.)
+
+%%CELL code
+def _label_pt(feat: str) -> str:
+    """Traduz nomes técnicos para rótulos legíveis (alinhado ao _label_feature do 05_5)."""
+    mapa = {'temperature_2m': 'temperatura', 'relative_humidity_2m': 'umidade relativa',
+            'wind_speed_10m': 'velocidade do vento', 'surface_pressure': 'pressão',
+            'hora': 'hora do dia', 'mes': 'mês', 'dia_semana': 'dia da semana',
+            'trimestre': 'trimestre'}
+    base = feat.replace('_lag4h', ' (defasado 4h)')
+    for k, v in mapa.items():
+        if base.startswith(k):
+            return base.replace(k, v)
+    return base
+
+# Importância SHAP média |.| por classe, sobre a amostra X_shap
+importancias = {}
+for k, nome in enumerate(['OUTROS', 'CLIMA', 'VOO']):
+    m = np.abs(_shap_por_classe(shap_values, k)).mean(axis=0)
+    ordem = np.argsort(m)[::-1][:15]
+    importancias[nome] = [{'feature': X_shap.columns[i], 'rotulo': _label_pt(X_shap.columns[i]),
+                           'shap_medio_abs': round(float(m[i]), 6)} for i in ordem]
+
+macro_f1_test = f1_score(y_test, pred_test, average='macro')
+bundle = {
+    'janela': JANELA,
+    'classes': ['OUTROS', 'CLIMA', 'VOO'],
+    'features_lgbm': FEATURES,
+    'macro_f1_test': round(float(macro_f1_test), 4),
+    'pr_auc_por_classe': {nome: round(float(average_precision_score(
+        (y_test == k).astype(int), proba_test[:, k])), 4)
+        for k, nome in enumerate(['OUTROS', 'CLIMA', 'VOO'])},
+    'importancias_shap_por_classe': importancias,
+    'frac_empates_descartados': round(frac_empate, 4),
+    'obs': ('Teste balanceado por bucket (nao populacional). Probabilidades refletem o prior '
+            'de treino; ver ressalva de prior shift. Insumo PRIMARIO do 05_5 = modelos '
+            'pareados do 05_6; este bundle e explicacao global complementar.'),
+}
+with open(f'{DRIVE_BASE}/xai_explicacao_bundle.json', 'w', encoding='utf-8') as f:
+    json.dump(bundle, f, ensure_ascii=False, indent=2)
+
+joblib.dump(final_model,      f'{DRIVE_BASE}/modelo_xai_final.joblib')
+joblib.dump(modelo_calibrado, f'{DRIVE_BASE}/modelo_xai_calibrado.joblib')
+joblib.dump({'features': FEATURES, 'cat_features': CAT_FEATURES,
+             'best_params': final_params, 'best_iteration': best_iter, 'janela': JANELA},
+            f'{DRIVE_BASE}/modelo_xai_meta.joblib')
+print('Modelos, metadados e bundle de explicação persistidos.')
+print('Top features CLIMA:', [d['rotulo'] for d in importancias['CLIMA'][:5]])

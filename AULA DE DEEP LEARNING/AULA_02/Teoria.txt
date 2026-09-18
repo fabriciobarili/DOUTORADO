@@ -1,0 +1,77 @@
+Hoje vamos criar uma rede neural.
+
+Todo modelo ele parte de dados.
+X1
+X2
+
+Há 2 entradas, para facilitar o processo e diminuir a problemática em relação ao cálculo.
+Se usarmos muitos dados, cada dado de entrada ela necessariamente terá os pesos de todas as entradas para todos os neurônios.
+- Para fins didáticos, trabalharemos nessas 2 entradas.
+
+No arquivo rede.py há essa construção.
+
+((x1,x2),y) -> o y é o resultado esperado.
+Isso é UMA amostra dos dados.
+
+Dado esse modelo (x1,x2), a saída que estou esperando é parecida com a resposta dada pelo y?
+A saída esperada (que sai do neurônio) vs a saída esperada (y) é o loss.
+Assim, se a saída for 0.93 e o y era 1, o loss foi 0.07. Está certo e errado ao mesmo tempo.
+No entanto, se for 0.49 e 0.51 a diferença é pouca para saber se está certo ou errado. Por isso existe a função STEP.
+
+Então, é bom olhar o quão longe a saída (y') está do y.
+Então, no primeiro exemplo, 1 - 0.93 = 0.07
+E 1 - 0.02 = 0.98
+Assim, y-y'
+
+O problema dessa abordagem é problemática quando o Y for negativo.
+O ruim de trabalhar com números negativos, como o resultado é a soma das respostas, teremos uma soma negativa.
+Por isso, pode-se faezr (y-y')², pois sempre será positivo.
+
+Foi respolvida uma parte do problema.
+Daí faz um somatório de todas as amostras e faz-se uma média (dividindo pela qtde das amostras que foram dadas).
+
+Os erros são calculados por*:
+- Epoch
+- Batch
+- outros
+
+*Mas, depende do modelo de otimização
+
+Até aqui fizemos o Loss Function, Cost Function, min square error (MSE) (erro quadrático médio).
+
+===================
+
+Depois de resolver o LOSS, temos que dizer o que é importante para os neurônios o que é importante par apassar para a próxima camada.
+Portanto, em cada neurônio, há um somatório de cada informação que chega nele + a função de ativação.
+A função de ativação avisa o que é importante pois ativa os neurônios de formas diferentes em cada neurônio. isso ocorre para que cada neurônio consiga trabalhar em características diferentes (pelos pesos).
+-- A função de ativação (reLu, Sigmoide,...) vai decidir o que é importante e o que não é.
+-- Sigmoide (1/1+e(-x)): se a informação de entrada for abaixo de zero, a nossa saída será zero (aí diz que não é tão importante)
+---- No entanto, quanto + positivo for o valor ela deixará o valor maior, fazendo que aquela informação tenha maior peso.
+-- o reLU, se for abaixo de zero ela manda zero, se for positivo ela manda o valor de X
+** Naqueles gráficos que a gente vê, que tem X e Y, o Y vira o X no peso da próxima entrada.
+**e é o número de euler (2,71828)
+
+Assim, o somatório de um neurônio seria:
+==primeira camada
+A1.1 = g(x1*w1 + x2*w2 + Bias1)
+A1.2 = g(x2*w2 + x1*w1 + Bias2)
+==segunda camada
+A2 = g(A1.1 * w5 + A1.2 * w6 + Bias3)
+==saída
+y' = A2
+"g" é a função de ativação
+
+=== Forward (entra a derivada)
+Pense no y = x²
+x = (-2, -1,- 0,1,2,3)
+logo
+y = (4,1,0,1,4,9)
+No gráfico faz um U. Queremos encontrar a equação que tenha um ponto mínimo (zero, o ótimo global, com o loss zero)
+o X é o peso e o Y é o loss
+
+Learning rate é o 'passo' que o algoritmo dá para descer a montanha a fim de entender o quão perto da base está.
+É o valor de y * 1e-³
+
+
+=== Para doutorado:
+Professor passou o TabTransformer e o FTTransformer, pois, para dados tabulares ele cria uma semântica entre as colunas para entender os padrões.
