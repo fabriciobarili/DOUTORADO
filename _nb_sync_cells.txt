@@ -1,0 +1,435 @@
+%%CELL markdown
+# 🔄 Sync: GitHub → Google Drive
+
+Mantém os arquivos da sua pasta no Google Drive **sincronizados com o repositório GitHub**, baixando automaticamente apenas o que foi atualizado.
+
+## O que este notebook faz
+
+| Passo | Ação |
+|-------|------|
+| **1** | Lista todos os arquivos na pasta do Drive onde este notebook está |
+| **2** | Consulta o GitHub para ver quais arquivos existem no repositório |
+| **3** | Compara as versões usando SHA de blob git (o mesmo algoritmo que o Git usa) |
+| **4** | Baixa e substitui apenas os arquivos que foram atualizados no GitHub |
+
+## Pré-requisito: token do GitHub
+1. Acesse: `github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)`
+2. Crie um token com escopo **`repo`** (repositório privado) ou **`public_repo`** (público)
+3. Copie o token e adicione no Colab em **🔑 Secrets** com o nome `GITHUB_TOKEN`
+
+> **Por que SHA de blob git?** O Git identifica cada arquivo pelo SHA-1 do seu conteúdo puro
+> (formula: `sha1("blob {tamanho}\0{conteudo}")`). Se os SHAs baterem, os arquivos são
+> **idênticos** — sem precisar comparar datas ou tamanhos, que podem ser imprecisos.
+
+%%CELL code
+# ── Montagem do Drive ──────────────────────────────────────────────────────────
+from google.colab import drive, userdata
+drive.mount('/content/drive', force_remount=False)
+
+# ── Imports (todos disponíveis no Colab sem pip install) ──────────────────────
+import requests
+import hashlib
+import json
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+import pandas as pd
+from IPython.display import display, HTML
+
+print("✅ Drive montado e bibliotecas carregadas.")
+
+%%CELL markdown
+## ⚙️ Configuração
+
+Edite as três variáveis principais antes de rodar pela primeira vez.
+
+%%CELL code
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURAÇÃO — edite aqui
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Repositório GitHub
+GITHUB_REPO   = "fabriciobarili/DOUTORADO"   # formato: <usuario>/<repositorio>
+GITHUB_BRANCH = "master"                      # branch a sincronizar
+GITHUB_PASTA  = "03_ANALISE"                  # pasta do repo (deixe "" para raiz)
+RECURSIVO     = True                          # True = inclui subpastas recursivamente
+
+# Pasta de destino no Drive
+# Aponte para a mesma pasta onde este notebook está salvo no Drive
+DRIVE_PASTA   = "/content/drive/MyDrive/DOUTORADO/03_ANALISE"
+
+# Padrões de arquivo a ignorar na comparação (prefixos ou sufixos)
+# O manifesto interno já é ignorado automaticamente
+IGNORAR = [
+    "_sync_manifest.json",   # manifesto interno deste notebook
+    ".ipynb_checkpoints",    # checkpoints do Jupyter
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Token do GitHub — lido dos Secrets do Colab (não edite aqui)
+# ─────────────────────────────────────────────────────────────────────────────
+GITHUB_TOKEN = userdata.get('GITHUB_TOKEN')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Arquivo de manifesto (criado automaticamente na primeira sync)
+# Registra o SHA de cada arquivo na última vez que foi baixado
+# ─────────────────────────────────────────────────────────────────────────────
+MANIFESTO = os.path.join(DRIVE_PASTA, "_sync_manifest.json")
+
+# ── Validação ─────────────────────────────────────────────────────────────────
+os.makedirs(DRIVE_PASTA, exist_ok=True)
+assert GITHUB_TOKEN, (
+    "❌ Token do GitHub não encontrado.\n"
+    "   Adicione GITHUB_TOKEN em 🔑 Secrets (ícone de chave na barra lateral)."
+)
+print(f"📁 Pasta local  : {DRIVE_PASTA}")
+print(f"📦 Repositório  : https://github.com/{GITHUB_REPO}/tree/{GITHUB_BRANCH}/{GITHUB_PASTA or '(raiz)'}")
+print(f"🔁 Recursivo    : {RECURSIVO}")
+
+%%CELL markdown
+## 🔧 Funções auxiliares
+
+%%CELL code
+def _git_blob_sha(conteudo_bytes: bytes) -> str:
+    """
+    Calcula o SHA-1 de blob git — idêntico ao que o GitHub usa internamente.
+
+    Fórmula: sha1("blob {tamanho_em_bytes}\\0{conteudo_bruto}")
+
+    Usar este SHA garante comparação exata: se o SHA local == SHA do GitHub,
+    os arquivos são byte a byte iguais, independentemente de datas ou encoding.
+    """
+    cabecalho = f"blob {len(conteudo_bytes)}\0".encode()
+    return hashlib.sha1(cabecalho + conteudo_bytes).hexdigest()
+
+
+def _headers() -> dict:
+    """Cabeçalhos de autenticação para a GitHub API v3."""
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def listar_github(repo: str, branch: str, pasta: str, recursivo: bool) -> dict:
+    """
+    Lista todos os arquivos de uma pasta do repo GitHub usando a Git Trees API.
+
+    Vantagem: uma única chamada de API retorna toda a árvore do repositório,
+    em vez de uma chamada por arquivo (Contents API). Muito mais eficiente.
+
+    Retorna: dict { caminho_relativo_dentro_da_pasta: {sha, size, full_path} }
+    """
+    url = f"https://api.github.com/repos/{repo}/git/trees/{branch}?recursive=1"
+    resp = requests.get(url, headers=_headers(), timeout=30)
+    resp.raise_for_status()
+
+    truncado = resp.json().get("truncated", False)
+    if truncado:
+        print("⚠️  Aviso: o repositório tem mais de 100k objetos. "
+              "Alguns arquivos podem não aparecer na listagem.")
+
+    arvore = resp.json().get("tree", [])
+    prefixo = pasta.rstrip("/") + "/" if pasta else ""
+    arquivos = {}
+
+    for item in arvore:
+        if item["type"] != "blob":
+            continue
+        path = item["path"]
+        if not path.startswith(prefixo):
+            continue
+        relativo = path[len(prefixo):]
+        # Se não recursivo, ignora arquivos em subpastas
+        if not recursivo and "/" in relativo:
+            continue
+        # Ignora padrões configurados
+        if any(ign in relativo for ign in IGNORAR):
+            continue
+        arquivos[relativo] = {
+            "sha": item["sha"],
+            "size": item.get("size", 0),
+            "full_path": path,
+        }
+
+    return arquivos
+
+
+def baixar_arquivo(repo: str, branch: str, full_path: str) -> bytes:
+    """
+    Faz download do conteúdo bruto de um arquivo via raw.githubusercontent.com.
+
+    Usa o endpoint raw (não a API) para evitar limite de 1 MB da Contents API
+    e para não precisar decodificar Base64.
+    """
+    url = f"https://raw.githubusercontent.com/{repo}/{branch}/{full_path}"
+    resp = requests.get(url, headers=_headers(), timeout=120)
+    resp.raise_for_status()
+    return resp.content
+
+
+def ultimo_commit_github(repo: str, branch: str, full_path: str) -> str:
+    """
+    Retorna a data ISO do último commit que modificou o arquivo.
+    Chamado apenas para arquivos que serão atualizados (não para todos),
+    para economizar chamadas de API.
+    """
+    url = f"https://api.github.com/repos/{repo}/commits"
+    resp = requests.get(
+        url, headers=_headers(),
+        params={"path": full_path, "sha": branch, "per_page": 1},
+        timeout=30,
+    )
+    if resp.ok and resp.json():
+        return resp.json()[0]["commit"]["committer"]["date"]
+    return "?"
+
+
+def carregar_manifesto(caminho: str) -> dict:
+    """
+    Carrega o manifesto de sincronização do arquivo JSON local.
+    Se não existir (primeira execução), retorna um manifesto vazio.
+
+    O manifesto registra, para cada arquivo sincronizado:
+    - sha_github: o SHA do blob no momento do último download
+    - baixado_em: timestamp ISO da última sincronização
+
+    Na próxima execução, se o SHA do GitHub for diferente do sha_github
+    registrado, sabemos que o arquivo foi atualizado no repo e deve ser baixado.
+    """
+    if os.path.exists(caminho):
+        with open(caminho, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "repo": GITHUB_REPO,
+        "branch": GITHUB_BRANCH,
+        "pasta": GITHUB_PASTA,
+        "ultima_sync": None,
+        "files": {},
+    }
+
+
+def salvar_manifesto(caminho: str, manifesto: dict):
+    """Salva o manifesto atualizado no Drive."""
+    manifesto["ultima_sync"] = datetime.now(timezone.utc).isoformat()
+    with open(caminho, "w", encoding="utf-8") as f:
+        json.dump(manifesto, f, ensure_ascii=False, indent=2)
+
+
+print("✅ Funções carregadas.")
+
+%%CELL markdown
+## 📋 Passo 1 — Arquivos locais (Drive)
+
+%%CELL code
+arquivos_locais = {}
+pasta_local = Path(DRIVE_PASTA)
+
+# Usa rglob para recursivo, glob simples para nível único
+globber = pasta_local.rglob("*") if RECURSIVO else pasta_local.glob("*")
+
+for arquivo in sorted(globber):
+    if not arquivo.is_file():
+        continue
+    nome_rel = arquivo.relative_to(pasta_local).as_posix()
+
+    # Ignora padrões configurados
+    if any(ign in nome_rel for ign in IGNORAR):
+        continue
+
+    conteudo = arquivo.read_bytes()
+    arquivos_locais[nome_rel] = {
+        "sha_local": _git_blob_sha(conteudo),
+        "tamanho": len(conteudo),
+        "caminho": str(arquivo),
+    }
+
+print(f"📂 {len(arquivos_locais)} arquivo(s) na pasta local:\n   {DRIVE_PASTA}\n")
+for nome in sorted(arquivos_locais):
+    kb = arquivos_locais[nome]["tamanho"] / 1024
+    icone = "📓" if nome.endswith(".ipynb") else "📄"
+    print(f"  {icone} {nome}  ({kb:.1f} KB)  SHA: {arquivos_locais[nome]['sha_local'][:8]}…")
+
+%%CELL markdown
+## 🌐 Passo 2 — Arquivos no GitHub
+
+%%CELL code
+print(f"🔍 Consultando GitHub …")
+print(f"   Repo   : {GITHUB_REPO}")
+print(f"   Branch : {GITHUB_BRANCH}")
+print(f"   Pasta  : {GITHUB_PASTA or '(raiz)'}\n")
+
+arquivos_github = listar_github(GITHUB_REPO, GITHUB_BRANCH, GITHUB_PASTA, RECURSIVO)
+
+print(f"☁️  {len(arquivos_github)} arquivo(s) encontrado(s) no GitHub:\n")
+for nome in sorted(arquivos_github):
+    kb = arquivos_github[nome]["size"] / 1024
+    icone = "📓" if nome.endswith(".ipynb") else "📄"
+    print(f"  {icone} {nome}  ({kb:.1f} KB)  SHA: {arquivos_github[nome]['sha'][:8]}…")
+
+%%CELL markdown
+## 🔍 Passo 3 — Comparação de versões
+
+A comparação usa três informações:
+
+- **SHA local**: SHA-1 do blob calculado a partir do conteúdo do arquivo no Drive
+- **SHA GitHub**: SHA-1 do blob registrado pelo GitHub na árvore do repositório
+- **SHA manifesto**: SHA-1 do blob na última vez que este notebook fez o download
+
+**Regra de decisão:**
+- `SHA local == SHA GitHub` → ✅ Idêntico (nenhuma ação)
+- `SHA GitHub ≠ SHA manifesto` → 🔄 GitHub foi atualizado → **baixar**
+- `SHA GitHub == SHA manifesto` mas `SHA local ≠ SHA GitHub` → ✏️ Você modificou localmente → **manter local**
+- Arquivo só no GitHub → 🆕 Arquivo novo → **baixar**
+- Arquivo só no Drive → 💾 Só local (excluído do repo ou extra local)
+
+%%CELL code
+manifesto = carregar_manifesto(MANIFESTO)
+arquivos_manifesto = manifesto.get("files", {})
+
+todos_nomes = sorted(set(arquivos_locais) | set(arquivos_github))
+linhas = []
+
+for nome in todos_nomes:
+    no_local  = nome in arquivos_locais
+    no_github = nome in arquivos_github
+
+    if no_github and no_local:
+        sha_local  = arquivos_locais[nome]["sha_local"]
+        sha_github = arquivos_github[nome]["sha"]
+        sha_sync   = arquivos_manifesto.get(nome, {}).get("sha_github", "")
+
+        if sha_local == sha_github:
+            status = "✅ Idêntico"
+            acao   = "—"
+        elif sha_github != sha_sync:
+            # GitHub mudou desde a última sync → GitHub é mais recente
+            status = "🔄 GitHub atualizado"
+            acao   = "Baixar"
+        else:
+            # GitHub não mudou, mas local é diferente → local foi modificado por você
+            status = "✏️  Local modificado"
+            acao   = "Manter"
+
+    elif no_github and not no_local:
+        status = "🆕 Novo no GitHub"
+        acao   = "Baixar"
+
+    else:  # só local
+        status = "💾 Só no Drive"
+        acao   = "—"
+
+    linhas.append({
+        "Arquivo"    : nome,
+        "Status"     : status,
+        "Ação"       : acao,
+        "SHA GitHub" : arquivos_github.get(nome, {}).get("sha", "—")[:8] + "…" if no_github else "—",
+        "SHA Local"  : arquivos_locais.get(nome, {}).get("sha_local", "—")[:8] + "…" if no_local else "—",
+    })
+
+df = pd.DataFrame(linhas)
+display(df.style.applymap(
+    lambda v: "color: green"  if "✅" in str(v)
+         else "color: orange" if "🔄" in str(v) or "🆕" in str(v)
+         else "color: #888"   if "✏️" in str(v) or "💾" in str(v)
+         else "",
+    subset=["Status"]
+))
+
+para_baixar = [l["Arquivo"] for l in linhas if l["Ação"] == "Baixar"]
+total_igual  = sum(1 for l in linhas if "✅" in l["Status"])
+total_modif  = sum(1 for l in linhas if "✏️" in l["Status"])
+total_local  = sum(1 for l in linhas if "💾" in l["Status"])
+
+print(f"\n📊 Resumo:")
+print(f"  ✅ {total_igual} arquivo(s) já atualizados")
+print(f"  🔄 {len(para_baixar)} arquivo(s) para baixar do GitHub")
+print(f"  ✏️  {total_modif} arquivo(s) modificados localmente (não serão substituídos)")
+print(f"  💾 {total_local} arquivo(s) só no Drive (não removidos)")
+
+%%CELL markdown
+## ⬇️ Passo 4 — Baixar atualizações do GitHub
+
+%%CELL code
+if not para_baixar:
+    print("✅ Tudo já está atualizado. Nenhum arquivo foi baixado.")
+else:
+    print(f"⬇️  Baixando {len(para_baixar)} arquivo(s) …\n")
+    erros   = []
+    baixados = []
+
+    for nome in para_baixar:
+        info    = arquivos_github[nome]
+        destino = pasta_local / nome
+
+        # Cria subpastas se necessário (para arquivos em subdiretórios)
+        destino.parent.mkdir(parents=True, exist_ok=True)
+
+        print(f"  ⬇️  {nome} …", end=" ")
+        try:
+            conteudo = baixar_arquivo(GITHUB_REPO, GITHUB_BRANCH, info["full_path"])
+
+            # Verifica o SHA do que foi baixado (segurança contra download corrompido)
+            sha_verificado = _git_blob_sha(conteudo)
+            if sha_verificado != info["sha"]:
+                raise ValueError(
+                    f"SHA inválido após download: esperado {info['sha'][:8]}, "
+                    f"obtido {sha_verificado[:8]}"
+                )
+
+            destino.write_bytes(conteudo)
+
+            # Atualiza o manifesto com o SHA desta versão
+            manifesto.setdefault("files", {})[nome] = {
+                "sha_github" : info["sha"],
+                "baixado_em" : datetime.now(timezone.utc).isoformat(),
+            }
+
+            kb = len(conteudo) / 1024
+            print(f"✅ {kb:.1f} KB")
+            baixados.append(nome)
+
+        except Exception as e:
+            erros.append((nome, str(e)))
+            print(f"❌ ERRO: {e}")
+
+    # Salva o manifesto atualizado no Drive
+    salvar_manifesto(MANIFESTO, manifesto)
+
+    print(f"\n{'─' * 55}")
+    print(f"✅ {len(baixados)} arquivo(s) baixados com sucesso.")
+    if erros:
+        print(f"❌ {len(erros)} erro(s):")
+        for nome, msg in erros:
+            print(f"   • {nome}: {msg}")
+    print(f"\n📋 Manifesto salvo em: {MANIFESTO}")
+    print(f"   (registra os SHAs desta sync para as próximas execuções)")
+
+%%CELL markdown
+## ℹ️ Sobre o manifesto de sincronização
+
+O arquivo `_sync_manifest.json` é criado automaticamente na pasta do Drive.
+Ele é fundamental para o funcionamento correto: sem ele, o notebook não consegue distinguir
+entre "o GitHub atualizou o arquivo" e "você modificou o arquivo localmente".
+
+**Não apague este arquivo.** Se você apagar, na próxima execução todos os arquivos
+serão tratados como novos e baixados novamente do GitHub (comportamento seguro, mas desnecessário).
+
+**Conteúdo do manifesto atual:**
+
+%%CELL code
+if os.path.exists(MANIFESTO):
+    with open(MANIFESTO, "r", encoding="utf-8") as f:
+        dados = json.load(f)
+
+    print(f"📋 Última sync  : {dados.get('ultima_sync', 'nunca')}")
+    print(f"   Repositório  : {dados.get('repo', '—')}")
+    print(f"   Branch       : {dados.get('branch', '—')}")
+    print(f"   Pasta        : {dados.get('pasta', '—')}\n")
+    print(f"   Arquivos registrados ({len(dados.get('files', {}))}):")
+    for arq, info in sorted(dados.get("files", {}).items()):
+        print(f"   • {arq}")
+        print(f"     SHA: {info['sha_github'][:16]}…  |  baixado em: {info.get('baixado_em', '?')}")
+else:
+    print("📋 Manifesto ainda não criado (será gerado no Passo 4).")

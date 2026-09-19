@@ -2,6 +2,23 @@
 
 ---
 
+## [2026-09-19] — Notebook de sincronização GitHub → Drive
+
+### O que mudou
+- **Novo notebook `Sync_Git_Para_Drive.ipynb`** — roda no Google Colab e mantém uma pasta do Drive sincronizada com o repositório GitHub. Na prática: você abre o notebook no Colab, roda as células de cima para baixo e ele busca sozinho o que foi atualizado no GitHub e substitui os arquivos desatualizados no Drive
+- **Como funciona a comparação:** usa o SHA de blob git — o mesmo algoritmo que o Git usa internamente para identificar arquivos. Se o SHA bater, os arquivos são idênticos; se diferir, o GitHub tem uma versão nova. Isso elimina falsos positivos por diferença de data ou tamanho
+- **Manifesto de sincronização (`_sync_manifest.json`):** criado automaticamente na pasta do Drive. Registra o SHA de cada arquivo no momento do último download, permitindo distinguir entre "GitHub atualizou o arquivo" (→ baixar) e "você modificou localmente" (→ manter). Sem esse registro, seria impossível saber a direção da mudança
+- **Configurável:** repositório, branch, pasta do repo e pasta do Drive são variáveis editáveis no topo do notebook. Suporta sync recursiva (incluindo subpastas) ou só no nível raiz da pasta
+- **Seguro:** o token do GitHub é lido dos Secrets do Colab (nunca digitado no código); verifica o SHA após o download para detectar arquivos corrompidos; não apaga nada do Drive (arquivos só locais são preservados)
+- Arquivo-fonte das células em `_nb_sync_cells.txt` (padrão do projeto)
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-18] — Narrador natural robusto: previsão do tempo real + explicação por trás da resposta
 
 ### O que mudou
