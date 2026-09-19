@@ -2,6 +2,23 @@
 
 ---
 
+## [2026-09-19] — Narrador mais cauteloso, com foco em quem chega, e registro de cada consulta
+
+### O que mudou
+- **O narrador ficou mais criterioso e menos "otimista".** Antes ele tendia a recomendar ir ao aeroporto com facilidade. Agora, uma chance abaixo de 45% é tratada explicitamente como **baixa** e, por si só, não justifica a viagem. A recomendação de ir só aparece quando o sinal é forte **e** consistente
+- **Recomendação de atraso agora exige padrão recorrente.** Para sugerir ir por causa de atrasos de voo, o histórico daquele horário e dia da semana precisa mostrar atrasos **se repetindo em vários dias distintos** e concentrados numa mesma companhia aérea ou origem. Atrasos esporádicos deixam de virar recomendação
+- **Correção importante de enquadramento: o motorista busca quem CHEGA (desembarca), não quem parte.** Textos como "voos que saem atrasados" foram corrigidos — o que gera corrida é o **desembarque** de passageiros de voos que chegam atrasados. O assistente foi instruído a nunca mais falar em voos que "saem" ou "partem"
+- **Detalhes do voo mais úteis:** a resposta informa a companhia aérea, de onde o voo está chegando, se é linha nacional ou internacional e o horário previsto de chegada (desembarque) em horário local
+- **Registro (log) de cada consulta ao assistente.** Toda pergunta agora grava um arquivo (`log_narrador.jsonl` no Drive) com: as informações e valores enviados, o texto exato enviado ao assistente, a resposta recebida, o horário da solicitação, o tempo de resposta e o custo estimado em dólares (com base no preço do modelo usado). Serve para auditar e comparar as respostas ao longo do tempo
+- **Correção de erro no notebook de features** (`05_6_FeatureEng_Individual_vs_Agrupado.ipynb`): colunas de texto (fuso, URL, índice espacial, modo, data) estavam chegando ao modelo e causavam falha. Agora apenas colunas numéricas são usadas, de forma consistente entre os dois modos de treino
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-19] — Notebook de sincronização GitHub → Drive
 
 ### O que mudou
