@@ -120,9 +120,22 @@ EXP_CLIMA_M = f'{DRIVE_BASE}/modelo_par_clima_meta.json'
 EXP_ATRASO  = f'{DRIVE_BASE}/modelo_par_atraso.joblib'
 EXP_ATRASO_M= f'{DRIVE_BASE}/modelo_par_atraso_meta.json'
 
+# --- Climatologia de atraso na CHEGADA (feature PROSPECTIVA, sem vazamento) ---
+# Fonte: 01_todos_voos_consolidados.csv (VRA/ANAC) = TODOS os voos de 2025 (pontuais +
+# atrasados), ao contrário do 03_voos_atrasados_sbpa.csv (só atrasados => pós-fato). Com o
+# denominador (voos pontuais) dá para calcular a TAXA histórica de atraso por (dia_semana,
+# hora): um PRIOR disponível ANTES do fato (não é pós-fato), que pode entrar legitimamente no
+# modelo de atraso. A tabela é exportada para o 05_5 reproduzir a feature no serve (sem skew).
+CONSOLIDADO_VOOS  = f'{DRIVE_BASE}/01_PRE_GERACAO/01_todos_voos_consolidados.csv'  # <-- ajuste o caminho
+TZ_VRA            = 'America/Sao_Paulo'   # fuso das colunas do VRA; use None se já estiver em UTC  # <-- ajuste
+LIMIAR_ATRASO_MIN = 15                    # atraso na chegada (min) para contar como "atrasado"
+PSEUDO_CONTAGEM_CLIM = 20                 # força do prior (voos-equivalentes) no shrinkage empírico-Bayes:
+                                          # células (dia_semana,hora) com poucos voos são puxadas p/ a taxa global
+EXP_CLIMATOLOGIA  = f'{DRIVE_BASE}/climatologia_atraso_sbpa.csv'   # tabela (dia_semana,hora) lida pelo 05_5
+EXP_REPUTACAO_SLOT = f'{DRIVE_BASE}/reputacao_slot_sbpa.csv'       # piores CIAs/origens por slot (contexto textual p/ 05_5)
+
 print('Config OK | estudo=%s | produção=%s | posfato_atraso=%s'
       % (JANELA_AGRUPADO, JANELA_PROD, INCLUIR_FEATURES_POSFATO_ATRASO))
-
 %%CELL code
 # --- Conexão com Google Drive + Google Cloud Storage (Colab) ---
 # Padrão idêntico ao 05_4/05_6 originais (funciona sem HMAC/httpfs): autentica no GCP,
@@ -158,6 +171,137 @@ df_clima = df_clima.dropna(subset=['time']).sort_values('time').reset_index(drop
 print('Clima:', df_clima.shape, '| Voos:', df_voos.shape)
 print('Colunas de voos:', list(df_voos.columns))
 
+%%CELL code
+# --- Prior prospectivo de atraso na CHEGADA em SBPA (climatologia + reputação por slot) ---
+# Lê o VRA consolidado (TODOS os voos de 2025, pontuais + atrasados) e devolve uma tabela
+# indexada por (dia_semana, hora) EM UTC com SEIS features PROSPECTIVAS (disponíveis antes
+# do fato -> não vazam), que passam a alimentar o modelo de atraso:
+#   Climatologia (volume/severidade do slot):
+#     - taxa_atraso_hist        : P(chegada atrasada > limiar | dia_semana, hora)
+#     - atraso_medio_hist       : atraso médio de chegada (min), com piso em 0
+#     - chegadas_previstas_hist : nº médio de chegadas programadas na janela (contexto de volume)
+#   Reputação da companhia (3 níveis), AGREGADA ao slot pela composição histórica de escala:
+#     - rep_cia_slot        : reputação média das CIAs que costumam pousar naquele slot
+#     - rep_cia_origem_slot : reputação média dos pares (CIA, origem) daquele slot (situacional)
+#     - rep_origem_slot     : reputação média das origens daquele slot
+# ENQUADRAMENTO ANTI-VAZAMENTO: o narrador NÃO sabe qual voo específico vai chegar no horário
+# consultado — só conhece o slot (dia_semana, hora). Por isso features por-voo (voos_cia_*,
+# voos_orig_*) são pós-fato. Aqui as reputações das ENTIDADES são estimadas no histórico e
+# depois AGREGADAS ao slot pela composição de escala típica daquele horário -> prospectivo.
+#
+# SHRINKAGE (empirical Bayes) em toda taxa: (n*obs + K*alvo)/(n+K), K = pseudo. Células/entidades
+# com muitos voos quase não mudam; as raras deixam de exibir extremos ruidosos (0%/100%) e
+# ficam próximas do alvo. A reputação do PAR (nível 2) encolhe hierarquicamente rumo à
+# reputação da própria CIA (nível 1); CIA e origem encolhem rumo à taxa global.
+# chegadas_previstas_hist é VOLUME (não taxa) -> não recebe shrinkage.
+#
+# corte_utc (opcional): se informado, mantém só voos com CHEGADA_PREVISTA (UTC) <= corte, para
+# ajustar o prior SOMENTE com o período de treino (evita vazamento temporal na avaliação). Como
+# o modelo exportado também é treinado só nesse período, o mesmo prior serve treino e produção
+# sem skew — por isso NÃO usamos dois priors distintos.
+def construir_prior(caminho, tz_vra=TZ_VRA, limiar_min=LIMIAR_ATRASO_MIN,
+                    pseudo=PSEUDO_CONTAGEM_CLIM, corte_utc=None,
+                    topk_ctx=3, min_n_ctx=5):
+    usecols = ['ICAO_EMPRESA_AEREA', 'ICAO_AERODROMO_ORIGEM', 'ICAO_AERODROMO_DESTINO',
+               'CHEGADA_PREVISTA', 'CHEGADA_REAL', 'SITUACAO_VOO']
+    dfv = pd.read_csv(caminho, sep=';', usecols=usecols, dtype=str, encoding='utf-8')
+    dfv = dfv[(dfv['ICAO_AERODROMO_DESTINO'] == 'SBPA') &
+              (dfv['SITUACAO_VOO'] == 'REALIZADO')].copy()
+    prev = pd.to_datetime(dfv['CHEGADA_PREVISTA'], errors='coerce')
+    real = pd.to_datetime(dfv['CHEGADA_REAL'],     errors='coerce')
+    dfv = dfv.assign(_prev=prev, _real=real).dropna(subset=['_prev', '_real'])
+    # Local (VRA) -> UTC, para alinhar com os eventos. (Brasil sem horário de verão desde 2019.)
+    if tz_vra:
+        prev_utc = (dfv['_prev'].dt.tz_localize(tz_vra, ambiguous='NaT',
+                                                nonexistent='shift_forward')
+                                .dt.tz_convert('UTC'))
+    else:
+        prev_utc = dfv['_prev'].dt.tz_localize('UTC')
+    dfv = dfv.assign(_prev_utc=prev_utc).dropna(subset=['_prev_utc'])
+    # Corte temporal (train-only): mantém só voos cuja CHEGADA_PREVISTA (UTC) <= corte.
+    n_total = len(dfv)
+    if corte_utc is not None:
+        corte = pd.Timestamp(corte_utc)
+        corte = corte.tz_localize('UTC') if corte.tzinfo is None else corte.tz_convert('UTC')
+        dfv = dfv[dfv['_prev_utc'] <= corte].copy()
+    atraso_min = (dfv['_real'] - dfv['_prev']).dt.total_seconds() / 60.0   # diff local (invariante ao fuso)
+    dfv['_atrasado']   = (atraso_min > limiar_min).astype(int)
+    dfv['_atraso_pos'] = atraso_min.clip(lower=0)
+    dfv['dia_semana']  = dfv['_prev_utc'].dt.dayofweek
+    dfv['hora']        = dfv['_prev_utc'].dt.hour
+    dfv['_data']       = dfv['_prev_utc'].dt.date
+    dfv['_cia']  = dfv['ICAO_EMPRESA_AEREA'].astype(str).str.upper()
+    dfv['_orig'] = dfv['ICAO_AERODROMO_ORIGEM'].astype(str).str.upper()
+
+    # Priors globais (alvos do shrinkage)
+    taxa_global         = float(dfv['_atrasado'].mean())
+    atraso_medio_global = float(dfv['_atraso_pos'].mean())
+
+    def _shrink(soma, n, alvo):   # empirical Bayes: (soma + K*alvo)/(n+K), com obs = soma/n
+        return (soma + pseudo * alvo) / (n + pseudo)
+
+    # ---- Climatologia por slot (dia_semana, hora) ----
+    g = dfv.groupby(['dia_semana', 'hora'])
+    clim = g.agg(_soma_atr=('_atrasado', 'sum'),
+                 _soma_min=('_atraso_pos', 'sum'),
+                 _n_voos=('_atrasado', 'size'),
+                 _n_datas=('_data', 'nunique')).reset_index()
+    n = clim['_n_voos']
+    clim['taxa_atraso_hist']        = _shrink(clim['_soma_atr'], n, taxa_global)
+    clim['atraso_medio_hist']       = _shrink(clim['_soma_min'], n, atraso_medio_global)
+    clim['chegadas_previstas_hist'] = clim['_n_voos'] / clim['_n_datas'].clip(lower=1)
+
+    # ---- Reputações por ENTIDADE (empirical Bayes) ----
+    rc = dfv.groupby('_cia')['_atrasado'].agg(['sum', 'size'])   # Nível 1: CIA -> global
+    rep_cia  = _shrink(rc['sum'], rc['size'], taxa_global).to_dict()
+    ro = dfv.groupby('_orig')['_atrasado'].agg(['sum', 'size'])  # Nível 3: origem -> global
+    rep_orig = _shrink(ro['sum'], ro['size'], taxa_global).to_dict()
+    rco = dfv.groupby(['_cia', '_orig'])['_atrasado'].agg(['sum', 'size']).reset_index()
+    rco['_alvo'] = rco['_cia'].map(rep_cia).fillna(taxa_global)   # Nível 2: par -> shrink p/ CIA
+    rco['_rep']  = (rco['sum'] + pseudo * rco['_alvo']) / (rco['size'] + pseudo)
+    rep_par = {(c, o): r for c, o, r in zip(rco['_cia'], rco['_orig'], rco['_rep'])}
+
+    # ---- Agregação ao SLOT pela composição histórica de escala ----
+    # média por voo no slot == média ponderada pela contagem de voos de cada entidade no slot.
+    dfv['_rep_cia']  = dfv['_cia'].map(rep_cia).fillna(taxa_global)
+    dfv['_rep_orig'] = dfv['_orig'].map(rep_orig).fillna(taxa_global)
+    dfv['_rep_par']  = [rep_par.get((c, o), taxa_global) for c, o in zip(dfv['_cia'], dfv['_orig'])]
+    rep_slot = dfv.groupby(['dia_semana', 'hora']).agg(
+        rep_cia_slot=('_rep_cia', 'mean'),
+        rep_cia_origem_slot=('_rep_par', 'mean'),
+        rep_origem_slot=('_rep_orig', 'mean')).reset_index()
+
+    prior = (clim[['dia_semana', 'hora', 'taxa_atraso_hist', 'atraso_medio_hist',
+                   'chegadas_previstas_hist']]
+             .merge(rep_slot, on=['dia_semana', 'hora'], how='left'))
+
+    fallback = {'taxa_atraso_hist': taxa_global, 'atraso_medio_hist': atraso_medio_global,
+                'chegadas_previstas_hist': 0.0, 'rep_cia_slot': taxa_global,
+                'rep_cia_origem_slot': taxa_global, 'rep_origem_slot': taxa_global}
+
+    # ---- Contexto textual p/ o 05_5: piores pares (CIA, origem) por slot (NÃO entra no modelo) ----
+    grp = dfv.groupby(['dia_semana', 'hora', '_cia', '_orig']).size().reset_index(name='_n')
+    tot = dfv.groupby(['dia_semana', 'hora']).size().rename('_tot').reset_index()
+    grp = grp.merge(tot, on=['dia_semana', 'hora'])
+    grp['share'] = grp['_n'] / grp['_tot']
+    grp['rep']   = [rep_par.get((c, o), taxa_global) for c, o in zip(grp['_cia'], grp['_orig'])]
+    grp = grp[grp['_n'] >= min_n_ctx]
+    rep_ctx = (grp.sort_values(['dia_semana', 'hora', 'rep'], ascending=[True, True, False])
+                  .groupby(['dia_semana', 'hora']).head(topk_ctx)
+                  [['dia_semana', 'hora', '_cia', '_orig', 'rep', 'share']]
+                  .rename(columns={'_cia': 'cia', '_orig': 'origem'})
+                  .reset_index(drop=True))
+    print('  construir_prior: %d voos usados%s | taxa global = %.1f%%'
+          % (len(dfv), '' if corte_utc is None else ' de %d (train-only, corte=%s)' % (n_total, corte),
+             100 * taxa_global))
+    return prior, fallback, rep_ctx
+
+# Nomes das features do prior (climatologia + reputação) — usados na seleção e no check de namespace.
+COLS_CLIMATOLOGIA = ['taxa_atraso_hist', 'atraso_medio_hist', 'chegadas_previstas_hist',
+                     'rep_cia_slot', 'rep_cia_origem_slot', 'rep_origem_slot']
+
+print('construir_prior() definida | COLS_CLIMATOLOGIA =', COLS_CLIMATOLOGIA)
+print('(o prior é construído na Seção 8, após CORTE_PROD, para ser train-only — sem vazamento)')
 %%CELL markdown
 ## 2. Amostra estratificada (cache) — padrão eficiente do original
 
@@ -311,7 +455,12 @@ def selecionar_features(df, cols_excluir):
     proibidas = set(cols_excluir) | COLS_META | set(COLS_ESPACIAIS)
     if USE_DIST:
         proibidas.discard('dist_aeroporto_km')   # dist é permitido se USE_DIST
-    return [c for c in df.columns if c not in proibidas]
+    # Filtra também colunas não-numéricas (object, string, etc.) para garantir
+    # compatibilidade com LightGBM nos dois regimes (agrupado exclui via numeric_only=True;
+    # individual traz todas via merge_asof).
+    return [c for c in df.columns
+            if c not in proibidas
+            and pd.api.types.is_numeric_dtype(df[c])]
 
 def preparar_par_ts(df, classe_pos, classe_neg, pos_label, cols_excluir, corte_ts):
     """Par binário (neg vs pos) com split por TIMESTAMP fixo (request_dt), reutilizável
@@ -439,11 +588,10 @@ plt.tight_layout(); plt.show()
 %%CELL markdown
 ## 8. EXPORTAÇÃO DE PRODUÇÃO — modelos pareados para o Narrador (05_5)
 
-Aqui treinamos e salvamos os dois modelos no **contrato exato** do `05_5`. Diferenças
-em relação ao estudo: janela **1h**, features com **nomes do narrador** (sem rolling
-multi-horizonte, que o `construir_features` do 05_5 não gera), features **numéricas**.
-
-`_agregar_voos_prod` replica o do 05_5 (para não haver *train/serve skew*).
+As células a seguir treinam os dois modelos pareados de produção (clima e atraso),
+agregam os voos por janela, anexam a **climatologia prospectiva de atraso** (prior
+por `dia_semana` x `hora`, sem vazamento) e exportam tudo no contrato consumido pelo
+`05_5_Narrador_Natural.ipynb`.
 
 %%CELL code
 def _agregar_voos_prod(dfv, window_size):
@@ -500,7 +648,15 @@ def _haversine_km(lat1, lng1, lat2, lng2):
 def construir_base_producao():
     """Base de PRODUÇÃO (1h), namespace do 05_5. Clima agregado por janela (sem rolling
     multi-horizonte) + lags/diffs das 4 variáveis do contrato + voos enriquecidos +
-    temporal + dist opcional. Em nível de EVENTO (dataset_type/request_dt)."""
+    temporal + prior de atraso (climatologia + reputação, prospectivo) + dist opcional.
+    Em nível de EVENTO (dataset_type/request_dt).
+
+    O CORTE_PROD (80/20 temporal) é calculado ANTES do prior, e o prior é construído
+    train-only (voos com CHEGADA_PREVISTA <= CORTE_PROD): isso torna a avaliação honesta
+    (voos de teste não vazam) e, como o modelo exportado também só treina nesse período,
+    o mesmo prior serve treino e produção sem skew. Define os globais CORTE_PROD, PRIOR_DF,
+    PRIOR_FALLBACK e REP_CTX (usados na exportação e no meta)."""
+    global CORTE_PROD, PRIOR_DF, PRIOR_FALLBACK, REP_CTX
     w = JANELA_PROD
     # clima por janela (colunas cruas do CSV; SEM enriquecimento multi-horizonte)
     c = df_clima.copy(); c['time_window'] = c['time'].dt.floor(w)
@@ -515,6 +671,11 @@ def construir_base_producao():
     ev = pd.concat([DS_OUTROS, DS_CLIMA, DS_VOO], ignore_index=True) \
            .sort_values('request_dt').reset_index(drop=True)
     ev['time_window'] = ev['request_dt'].dt.floor(w)
+    # Corte temporal de produção (80% treino / 20% teste), calculado ANTES do prior para que
+    # o prior seja ajustado somente com voos do período de treino (sem vazamento temporal).
+    CORTE_PROD = ev['request_dt'].quantile(0.80)
+    PRIOR_DF, PRIOR_FALLBACK, REP_CTX = construir_prior(CONSOLIDADO_VOOS, corte_utc=CORTE_PROD)
+
     base = ev.merge(clima_agg, on='time_window', how='left') \
              .merge(voos_agg, on='time_window', how='left')
     # voos ausentes na janela -> 0 (janela sem voo atrasado)
@@ -523,6 +684,13 @@ def construir_base_producao():
                                               'atraso_medio_min', 'atraso_max_min'):
             base[col] = base[col].fillna(0.0)
     _add_temporais(base, 'request_dt')
+    # Prior de atraso (climatologia + reputação por dia_semana x hora, em UTC): junta pelos
+    # campos temporais já criados por _add_temporais. Ausências -> fallback global por coluna
+    # (raro: só (dia_semana,hora) sem nenhum voo histórico). Estas features NÃO são pós-fato.
+    base = base.merge(PRIOR_DF, on=['dia_semana', 'hora'], how='left')
+    for col in COLS_CLIMATOLOGIA:
+        if col in base.columns:
+            base[col] = base[col].fillna(PRIOR_FALLBACK[col])
     if USE_DIST and 'origin_h3' in base.columns:
         coords = base['origin_h3'].map(lambda hh: _h3_to_latlng(hh) if pd.notna(hh) else (AER_LAT, AER_LNG))
         base['lat'] = coords.map(lambda t: t[0]); base['lng'] = coords.map(lambda t: t[1])
@@ -530,19 +698,26 @@ def construir_base_producao():
     return base
 
 base_prod = construir_base_producao()
-CORTE_PROD = base_prod['request_dt'].quantile(0.80)
-print('base_prod', base_prod.shape, '| CORTE_PROD', CORTE_PROD)
-
+PRIOR_DF.to_csv(EXP_CLIMATOLOGIA, index=False, encoding='utf-8')      # <- o 05_5 lê o prior no serve
+REP_CTX.to_csv(EXP_REPUTACAO_SLOT, index=False, encoding='utf-8')     # <- contexto textual p/ a narração
+_na = int(base_prod[[c for c in COLS_CLIMATOLOGIA if c in base_prod.columns]].isna().sum().sum())
+print('base_prod', base_prod.shape, '| CORTE_PROD', CORTE_PROD, '| NaN no prior:', _na)
+print('prior (%d slots) -> %s' % (len(PRIOR_DF), EXP_CLIMATOLOGIA))
+print('contexto reputação (%d linhas) -> %s' % (len(REP_CTX), EXP_REPUTACAO_SLOT))
 %%CELL code
 # ------- Seleção de features de PRODUÇÃO para cada modelo pareado -------
 COLS_VOOS_PROD = ([c for c in base_prod.columns if c.startswith('voos_')] +
                   ['qtd_voos_previstos', 'qtd_empresas_aereas', 'atraso_medio_min', 'atraso_max_min'])
 COLS_VOOS_PROD = [c for c in COLS_VOOS_PROD if c in base_prod.columns]
 
-# CLIMA: só variáveis físicas/térmicas (escores compostos fora) + temporal (+dist). SEM voos.
+# CLIMA: só variáveis físicas/térmicas (escores compostos fora) + temporal (+dist). SEM voos
+# e SEM a climatologia de atraso (o modelo de clima é sobre tempo, não sobre atraso de voo).
 cols_excluir_clima_prod = sorted(set(
-    [c for c in base_prod.columns if eh_score_composto(c)] + COLS_VOOS_PROD))
-# ATRASO: escores fora sempre; voos pós-fato fora por padrão (flag). Temporal + clima (+dist).
+    [c for c in base_prod.columns if eh_score_composto(c)] + COLS_VOOS_PROD + COLS_CLIMATOLOGIA))
+# ATRASO: escores fora sempre; voos PÓS-FATO fora por padrão (flag). Temporal + clima +
+# climatologia (+dist). ATENÇÃO: COLS_CLIMATOLOGIA (taxa_atraso_hist, ...) são PROSPECTIVAS
+# (prior por dia_semana x hora, disponíveis antes do fato) -> ficam DENTRO do modelo de
+# atraso de propósito, e por isso NÃO entram na lista de exclusão abaixo.
 cols_excluir_atraso_prod = sorted(set([c for c in base_prod.columns if eh_score_composto(c)]))
 if not INCLUIR_FEATURES_POSFATO_ATRASO:
     cols_excluir_atraso_prod = sorted(set(cols_excluir_atraso_prod + COLS_VOOS_PROD))
@@ -559,6 +734,9 @@ def treinar_e_exportar_par(classe_pos, cols_excluir, model_path, meta_path, rotu
         'pr_auc': round(float(r['pr_auc']), 4),
         'best_iteration': int(r['best_iter']),
         'posfato_atraso': bool(INCLUIR_FEATURES_POSFATO_ATRASO),
+        'climatologia_atraso': [c for c in COLS_CLIMATOLOGIA if c in r['feats']],
+        'climatologia_fallback': {col: float(PRIOR_FALLBACK[col]) for col in COLS_CLIMATOLOGIA},  # fallback por coluna (sem skew)
+        'taxa_atraso_global': float(PRIOR_FALLBACK['taxa_atraso_hist']),   # retrocompat (fallback antigo do 05_5)
         'obs': ('Teste balanceado (query equaliza classes); macro_f1_nat=bal pois nao ha '
                 'conjunto natural. Ver limitacoes L1/L2 no .txt.'),
     }
@@ -574,7 +752,6 @@ res_clima_prod, meta_clima  = treinar_e_exportar_par(
     'DS_CLIMA', cols_excluir_clima_prod, EXP_CLIMA, EXP_CLIMA_M, 'CLIMA')
 res_atraso_prod, meta_atraso = treinar_e_exportar_par(
     'DS_VOO', cols_excluir_atraso_prod, EXP_ATRASO, EXP_ATRASO_M, 'ATRASO')
-
 %%CELL code
 # ------- Verificação de compatibilidade com o narrador (05_5) -------
 # O 05_5.construir_features() gera este superconjunto de nomes. Toda feature_lgbm exportada
@@ -585,6 +762,7 @@ NAMESPACE_NARRADOR = set(
     ['qtd_voos_previstos', 'qtd_empresas_aereas', 'atraso_medio_min', 'atraso_max_min'] +
     [f'voos_cia_{c}' for c in TOP_CIAS] + [f'voos_orig_{o}' for o in TOP_ORIGENS] +
     ['voos_linha_N', 'voos_linha_I', 'voos_sev_leve', 'voos_sev_moderado', 'voos_sev_grave'] +
+    COLS_CLIMATOLOGIA +                                                     # climatologia de atraso
     ['lat', 'lng', 'dist_aeroporto_km', 'hora', 'mes', 'dia_semana',
      'hora_sin', 'hora_cos', 'mes_sin', 'mes_cos', 'dia_semana_sin', 'dia_semana_cos'])
 
@@ -594,8 +772,15 @@ for nome, meta in [('clima', meta_clima), ('atraso', meta_atraso)]:
         print(f"ATENÇÃO [{nome}]: features fora do namespace do 05_5 (o narrador as zeraria): {fora}")
     else:
         print(f"OK [{nome}]: todas as {len(meta['features_lgbm'])} features são compatíveis com o 05_5.")
-print('\nModelos prontos para o 05_5_Narrador_Natural.ipynb.')
 
+# AÇÃO NECESSÁRIA no 05_5 (companheiro deste export): para NÃO zerar a climatologia no serve,
+# o narrador precisa carregar a tabela exportada e reproduzir as 3 features por (dia_semana,
+# hora) em UTC — o mesmo par temporal que ele já calcula. Enquanto isso não for feito, o
+# 05_5 preencherá taxa_atraso_hist/atraso_medio_hist/chegadas_previstas_hist com 0 (skew).
+if any(f in meta_atraso['features_lgbm'] for f in COLS_CLIMATOLOGIA):
+    print(f"\n[05_5] Carregar a climatologia exportada em '{EXP_CLIMATOLOGIA}' e reconstruir "
+          f"{[f for f in COLS_CLIMATOLOGIA if f in meta_atraso['features_lgbm']]} no serve.")
+print('\nModelos prontos para o 05_5_Narrador_Natural.ipynb.')
 %%CELL markdown
 ## 9. Conclusões e limitações (honestas)
 
@@ -607,8 +792,22 @@ macro-F1 e PR-AUC. Priorize **PR-AUC** sob desbalanceamento. Os modelos de produ
 1. **Granularidade só é comparável acima da resolução do clima** — daí a janela de 4h no
    estudo; a produção usa 1h (onde agrupado≡individual, correto para operação).
 2. **Teste não é populacional** (query equaliza classes) — métricas são pareadas/balanceadas.
-3. **Modelo de atraso rigoroso usa só clima+tempo**, pois o CSV é de voos já atrasados
-   (features de voo são pós-fato). `INCLUIR_FEATURES_POSFATO_ATRASO=True` reproduz o modelo
-   original (mais forte, porém com vazamento) — decisão sua, documentada no meta exportado.
+   Próximo passo natural: avaliar em prevalência real (taxa base de atraso na chegada em SBPA
+   ≈ 15,6% em 2025) e calibrar o limiar de decisão.
+3. **Modelo de atraso: pós-fato vs. prospectivo.** As features derivadas do
+   `03_voos_atrasados_sbpa.csv` (`voos_*`, `qtd_voos`, `atraso_*`) continuam **pós-fato** e
+   ficam fora por padrão (`INCLUIR_FEATURES_POSFATO_ATRASO=False`). **Novidade:** a partir do
+   VRA consolidado (`01_todos_voos_consolidados.csv`, que preserva os voos pontuais = o
+   denominador), o modelo de atraso agora recebe uma **climatologia PROSPECTIVA** por
+   `(dia_semana, hora)` — `taxa_atraso_hist`, `atraso_medio_hist`, `chegadas_previstas_hist` —
+   que é um prior conhecido **antes** do fato e, portanto, **não vaza**. É o primeiro sinal de
+   atraso legítimo (não-climático) que entra no modelo.
+   - *Ressalva de rigor:* a climatologia é agregada sobre o ano inteiro (prior estável); a
+     contribuição de qualquer janela individual ao seu próprio agregado é ~1/52, desprezível.
+     Para rigor máximo dá para computá-la só no período de treino (`< CORTE_PROD`).
+   - *Fuso:* a chave usa `CHEGADA_PREVISTA` convertida de `TZ_VRA` para UTC. Se os eventos
+     tiverem sido ancorados tratando o horário do VRA como UTC-ingênuo, use `TZ_VRA=None`.
+   - *Serve (05_5):* exige o companheiro — o narrador precisa carregar
+     `climatologia_atraso_sbpa.csv` e reconstruir as 3 features, senão elas são zeradas.
 4. **Vazamento espacial** — `lat/lng/densidade_h3` fora das features; só `dist_aeroporto_km`
    (contexto do motorista) entra, se `USE_DIST`.

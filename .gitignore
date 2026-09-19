@@ -4,3 +4,6 @@
 # Segredos e chaves de API (nunca versionar)
 chave.txt
 **/chave.txt
+
+# Dados brutos consolidados (>100MB, fora do versionamento; GitHub rejeita >100MB)
+01_PRE_GERACAO/01_todos_voos_consolidados.csv

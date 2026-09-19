@@ -2,6 +2,23 @@
 
 ---
 
+## [2026-09-19] — Reputação da companhia aérea (global, por origem e situacional) e avaliação sem "espiar o futuro"
+
+### O que mudou
+- **O modelo de atraso agora leva em conta a "fama" de cada companhia aérea, em três níveis.** (1) Reputação **global** — quanto mais uma companhia atrasa no geral, pior sua nota; (2) reputação da **origem** — aeroportos de onde os voos costumam sair atrasados também pesam; (3) reputação **situacional** — a combinação companhia + origem (a mesma companhia pode ser pontual saindo de um lugar e problemática saindo de outro). Cada nota é calculada com um amortecimento estatístico que evita exageros quando há poucos voos históricos
+- **Essas notas são resumidas por horário (dia da semana + hora), respeitando o que o assistente realmente sabe na hora de responder.** O narrador nunca sabe *qual* voo específico vai pousar num horário futuro — ele só sabe o dia e a hora. Por isso as reputações são combinadas pela composição histórica de voos daquele horário (quais companhias e origens costumam operar ali), em vez de olhar voo a voo. Isso mantém a informação **prospectiva** (utilizável para o futuro) e evita usar dados que só existiriam depois do fato
+- **Correção importante na avaliação: fim do "vazamento" de informação do futuro.** Antes, o histórico que alimentava o modelo era calculado sobre o ano inteiro — inclusive sobre os voos reservados para o teste. Agora esse histórico usa **somente o período de treino**, então a métrica de qualidade passa a ser honesta. Como bônus, o mesmo histórico de treino é o que o assistente usa de verdade no dia a dia, então o que o modelo aprendeu e o que ele recebe em produção passam a bater exatamente (sem descompasso)
+- **O assistente agora aponta as companhias e origens historicamente mais problemáticas daquele horário** (ex.: "LATAM vindo de Guarulhos costuma atrasar neste horário"). Esse texto é só uma explicação para o motorista conferir — **não** entra na conta do modelo, mantendo o tom conservador e o enquadramento de chegada/desembarque já adotados
+- **Fontes dos notebooks ressincronizadas.** Os arquivos-fonte de células (`_nb_05_5_cells.txt` e `_nb_05_6_cells.txt`, usados por `_gen_notebooks.py`) estavam defasados e, se regenerados, teriam apagado o trabalho recente. Foram reconstruídos a partir dos notebooks atuais, com verificação de que a ida e volta (`.ipynb` → `.txt` → `.ipynb`) é idêntica célula a célula. Novo utilitário `03_ANALISE/_ipynb_to_cells.py` faz essa conversão reversa (par do gerador existente)
+- **Dado bruto consolidado saiu do versionamento.** O arquivo `01_PRE_GERACAO/01_todos_voos_consolidados.csv` (~109 MB) foi adicionado ao `.gitignore` — arquivos acima de 100 MB são rejeitados pelo GitHub e este é dado de origem, não código. Continua disponível localmente
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-19] — Narrador mais cauteloso, com foco em quem chega, e registro de cada consulta
 
 ### O que mudou

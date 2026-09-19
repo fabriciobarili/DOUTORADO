@@ -57,7 +57,7 @@ janela **1h**.
 %%CELL code
 !pip install -q anthropic lightgbm shap h3 joblib requests
 
-import json, os, datetime, warnings, re
+import json, os, datetime, warnings, re, time
 import numpy as np
 import pandas as pd
 import requests
@@ -75,7 +75,6 @@ import shutil
 warnings.filterwarnings('ignore', message='.*binary classifier with TreeExplainer.*')
 
 print('Imports OK')
-
 %%CELL markdown
 ## 2. Configuração
 
@@ -95,10 +94,25 @@ META_CLIMA_PATH    = f'{DRIVE_BASE}/modelo_par_clima_meta.json'
 MODELO_ATRASO_PATH = f'{DRIVE_BASE}/modelo_par_atraso.joblib'
 META_ATRASO_PATH   = f'{DRIVE_BASE}/modelo_par_atraso_meta.json'
 BASE_DIR           = f'{DRIVE_BASE}/003_DADOS_SINTETICOS/arquivos_base'
+CLIMATOLOGIA_PATH  = f'{DRIVE_BASE}/climatologia_atraso_sbpa.csv'   # tabela (dia_semana,hora) exportada pelo 05_6
+REPUTACAO_SLOT_PATH= f'{DRIVE_BASE}/reputacao_slot_sbpa.csv'       # piores CIAs/origens por slot (contexto textual, NAO entra no modelo)
 
 # ---- Decisão ----
 LIMIAR_EVENTO = 0.5     # prob >= limiar em qualquer dimensão => há demanda ("pico")
+LIMIAR_BAIXA  = 0.45    # prob < este valor => chance BAIXA (a narração NÃO deve recomendar por ela)
 HORAS_SCAN    = [1, 2]  # passo 6: varredura para frente se não houver demanda no horário pedido
+
+# Critério de RECORRÊNCIA do atraso (feedback: só sugerir ir se o padrão for consistente).
+# Um slot (hora×dia-da-semana) só é considerado "recorrente" se voos chegaram atrasados em
+# pelo menos MIN_DIAS_RECORRENCIA datas distintas no histórico, com concentração relevante
+# de uma mesma CIA/origem (>= CONC_MIN_RECORRENCIA da amostra do slot).
+MIN_DIAS_RECORRENCIA  = 3
+CONC_MIN_RECORRENCIA  = 0.40
+
+# ---- Log das consultas ao LLM ----
+LOG_NARRADOR = f'{DRIVE_BASE}/log_narrador.jsonl'
+# Preço do Haiku 4.5 (USD por 1M tokens) — usado só para estimar custo no log.
+PRECO_LLM = {'input': 1.00, 'output': 5.00, 'cache_read': 0.10, 'cache_write': 1.25}
 
 # ---- Fuso: modelos treinados em UTC; motorista fala em horário local ----
 TZ_LOCAL = ZoneInfo('America/Sao_Paulo')
@@ -117,8 +131,8 @@ DIST_REPRESENTATIVA_KM = 8.0
 OPENMETEO_URL = ('https://customer-api.open-meteo.com/v1/forecast' if OPENMETEO_API_KEY
                  else 'https://api.open-meteo.com/v1/forecast')
 
-print('Config OK | limiar =', LIMIAR_EVENTO, '| Open-Meteo com chave:', bool(OPENMETEO_API_KEY))
-
+print('Config OK | limiar =', LIMIAR_EVENTO, '| baixa <', LIMIAR_BAIXA,
+      '| Open-Meteo com chave:', bool(OPENMETEO_API_KEY))
 %%CELL markdown
 ## 3. Autenticação e carga dos dois modelos pareados
 
@@ -221,6 +235,57 @@ for c in COLS_VOOS:
 _voos_marg['hora']       = _voos_marg['time_window'].dt.hour
 _voos_marg['dia_semana'] = _voos_marg['time_window'].dt.dayofweek
 PERFIL_VOOS = _voos_marg.groupby(['hora', 'dia_semana'])[COLS_VOOS].mean()
+
+# --- Prior de atraso (climatologia + reputação por dia_semana x hora), exportado pelo 05_6 ---
+# As COLUNAS são lidas do PRÓPRIO CSV (extensível): quando o 05_6 acrescenta features de
+# reputação (rep_cia_slot, rep_cia_origem_slot, rep_origem_slot), elas entram aqui sozinhas,
+# sem editar este notebook. Indexado por (dia_semana, hora) UTC — MESMA chave do treino do
+# modelo de atraso. Fallbacks por coluna vêm do meta (climatologia_fallback), iguais aos do 05_6.
+import os
+if os.path.exists(CLIMATOLOGIA_PATH):
+    _clim = pd.read_csv(CLIMATOLOGIA_PATH)
+    COLS_CLIMATOLOGIA = [c for c in _clim.columns if c not in ('dia_semana', 'hora')]
+    CLIMATOLOGIA_ATRASO = _clim.set_index(['dia_semana', 'hora'])[COLS_CLIMATOLOGIA]
+else:
+    print('AVISO: %s ausente — rode o 05_6 para gerá-lo. Usando fallback global em TODOS os slots.'
+          % CLIMATOLOGIA_PATH)
+    _clim = None
+    COLS_CLIMATOLOGIA = ['taxa_atraso_hist', 'atraso_medio_hist', 'chegadas_previstas_hist',
+                         'rep_cia_slot', 'rep_cia_origem_slot', 'rep_origem_slot']
+    CLIMATOLOGIA_ATRASO = (pd.DataFrame(columns=['dia_semana', 'hora'] + COLS_CLIMATOLOGIA)
+                             .set_index(['dia_semana', 'hora']))
+
+# Global EXATO (ponderado por voo); prefere o meta do modelo de atraso.
+TAXA_ATRASO_GLOBAL = meta_atraso.get('taxa_atraso_global')
+if TAXA_ATRASO_GLOBAL is None:
+    TAXA_ATRASO_GLOBAL = float(_clim['taxa_atraso_hist'].mean()) if _clim is not None else 0.156
+TAXA_ATRASO_GLOBAL = float(TAXA_ATRASO_GLOBAL)
+# Fallbacks por coluna — IDÊNTICOS ao 05_6. Prefere o dict do meta (climatologia_fallback); na
+# ausência (meta antigo), taxa/reputações -> global, demais -> 0. Cobre qualquer coluna nova.
+_fb_meta = meta_atraso.get('climatologia_fallback') or {}
+CLIM_FALLBACK = {}
+for _c in COLS_CLIMATOLOGIA:
+    if _c in _fb_meta:
+        CLIM_FALLBACK[_c] = float(_fb_meta[_c])
+    elif _c == 'taxa_atraso_hist' or _c.startswith('rep_'):
+        CLIM_FALLBACK[_c] = TAXA_ATRASO_GLOBAL
+    else:
+        CLIM_FALLBACK[_c] = 0.0
+print('Prior de atraso: %d slots | %d features (%s) | taxa global (fallback) = %.1f%%'
+      % (len(CLIMATOLOGIA_ATRASO), len(COLS_CLIMATOLOGIA), ', '.join(COLS_CLIMATOLOGIA),
+         100 * TAXA_ATRASO_GLOBAL))
+
+# --- Contexto textual de reputação por slot (piores CIAs/origens) — exportado pelo 05_6 ---
+# NÃO entra no modelo; serve só para a ficha técnica e a narração citarem quem historicamente
+# mais atrasa naquele horário. dict: (dia_semana, hora) -> lista de {cia, origem, rep, share}.
+REPUTACAO_SLOT = {}
+if os.path.exists(REPUTACAO_SLOT_PATH):
+    _rep = pd.read_csv(REPUTACAO_SLOT_PATH)
+    for (_ds, _hr), _g in _rep.groupby(['dia_semana', 'hora']):
+        REPUTACAO_SLOT[(int(_ds), int(_hr))] = _g[['cia', 'origem', 'rep', 'share']].to_dict('records')
+    print('Contexto de reputação: %d slots com piores CIAs/origens.' % len(REPUTACAO_SLOT))
+else:
+    print('AVISO: %s ausente — narração seguirá sem contexto explícito de reputação.' % REPUTACAO_SLOT_PATH)
 
 # Climatologia de fallback do clima (média por hora×mês), caso a API falhe e não haja histórico.
 COLS_CLIMA_CSV = [c for c in df_clima.select_dtypes('number').columns]
@@ -408,6 +473,18 @@ def construir_features(dt_local):
         row[f'{col}_sin'] = np.sin(2*np.pi * row[col] / period)
         row[f'{col}_cos'] = np.cos(2*np.pi * row[col] / period)
 
+    # Climatologia de atraso (prior prospectivo por dia_semana x hora, UTC): MESMA chave e
+    # MESMOS fallbacks do 05_6 -> o modelo de atraso recebe no serve o valor idêntico ao do
+    # treino (sem skew). ATENÇÃO à ORDEM da chave: (dia_semana, hora), não (hora, dia_semana).
+    chave_clim = (t_utc.dayofweek, t_utc.hour)
+    if chave_clim in CLIMATOLOGIA_ATRASO.index:
+        crow = CLIMATOLOGIA_ATRASO.loc[chave_clim]
+        for c in COLS_CLIMATOLOGIA:
+            row[c] = float(crow[c])
+    else:
+        for c in COLS_CLIMATOLOGIA:
+            row[c] = CLIM_FALLBACK[c]
+
     dt_loc = _para_utc(dt_local).tz_convert(TZ_LOCAL)
     ctx = {'t_utc': t_utc, 'dt_local': dt_loc,
            'clima_disponivel': bool(clima_atual)}
@@ -436,13 +513,31 @@ explainers = {nome: shap.TreeExplainer(d['model']) for nome, d in MODELOS.items(
 
 DIAS_SEMANA = ['segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado', 'domingo']
 
+_CIA_NOMES = {
+    'TAM': 'LATAM', 'AZU': 'Azul', 'GLO': 'Gol', 'TAP': 'TAP', 'ARG': 'Aerolíneas Argentinas',
+}
+_ORIG_NOMES = {
+    'SBGR': 'Guarulhos (SP)', 'SBSP': 'Congonhas (SP)',
+    'SBKP': 'Viracopos (SP)', 'SBCF': 'Confins (MG)', 'SBBR': 'Brasília (DF)',
+}
+
 def _fmt_valor(v):
     return 'ausente (sem leitura)' if (v is None or (isinstance(v, float) and np.isnan(v))) else v
+
+def _qtd_voos_coloquial(v):
+    """Contagem média de voos que CHEGAM atrasados -> texto coloquial para o motorista.
+    Enquadramento: o motorista busca passageiros que DESEMBARCAM de voos atrasados na chegada."""
+    if v < 0.1:  return 'sem histórico de voos chegando atrasados nesse horário'
+    if v < 0.6:  return 'raramente chega 1 voo atrasado (pouco desembarque extra)'
+    if v < 1.4:  return 'cerca de 1 voo chegando atrasado'
+    if v < 2.5:  return 'cerca de 2 voos chegando atrasados'
+    if v < 3.5:  return 'cerca de 3 voos chegando atrasados'
+    return f'em torno de {int(round(v))} voos chegando atrasados'
 
 def _label_feature(feat, valor):
     """Nome técnico -> descrição legível com o VALOR real (para o motorista conferir)."""
     v = _fmt_valor(valor)
-    if isinstance(v, str):   # ausente
+    if isinstance(v, str):
         base = {'temperature_2m': 'temperatura', 'relative_humidity_2m': 'umidade relativa',
                 'wind_speed_10m': 'velocidade do vento', 'surface_pressure': 'pressão'}.get(feat, feat)
         return f'{base} ({v})'
@@ -461,10 +556,10 @@ def _label_feature(feat, valor):
         'pressure_msl':             f'pressão ao nível do mar ({v:.0f} hPa)',
         'cloud_cover':              f'cobertura de nuvens ({v:.0f}%)',
         'vapour_pressure_deficit':  f'déficit de pressão de vapor ({v:.2f} kPa)',
-        'qtd_voos_previstos':       f'voos atrasados típicos na janela ({v:.1f})',
-        'qtd_empresas_aereas':      f'empresas aéreas típicas na janela ({v:.1f})',
-        'atraso_medio_min':         f'atraso médio típico ({v:.0f} min)',
-        'atraso_max_min':           f'atraso máximo típico ({v:.0f} min)',
+        'qtd_voos_previstos':       _qtd_voos_coloquial(v),
+        'qtd_empresas_aereas':      f'{v:.0f} empresa(s) aérea(s) com chegada atrasada típica',
+        'atraso_medio_min':         f'atraso médio histórico na chegada de {v:.0f} min',
+        'atraso_max_min':           f'atraso máximo histórico na chegada de {v:.0f} min',
         'hora':                     f'hora do dia UTC ({int(v)}h)',
         'mes':                      f'mês ({int(v)})',
         'dia_semana':               f'dia da semana UTC ({DIAS_SEMANA[int(v) % 7]})',
@@ -475,13 +570,61 @@ def _label_feature(feat, valor):
         return f'variação de {feat[len("diff_"):]} ({v:+.2f})'
     if feat.endswith('_lag'):
         return f'{feat[:-4]} na hora anterior ({v:.2f})'
-    if feat.startswith('voos_cia_'):   return f'voos atrasados da {feat[len("voos_cia_"):]} ({v:.1f})'
-    if feat.startswith('voos_orig_'):  return f'voos atrasados vindos de {feat[len("voos_orig_"):]} ({v:.1f})'
-    if feat == 'voos_linha_N':         return f'voos nacionais atrasados ({v:.1f})'
-    if feat == 'voos_linha_I':         return f'voos internacionais atrasados ({v:.1f})'
-    if feat.startswith('voos_sev_'):   return f'atrasos {feat[len("voos_sev_"):]} ({v:.1f})'
+    if feat.startswith('voos_cia_'):
+        cia = feat[len('voos_cia_'):]
+        return f'voos da {_CIA_NOMES.get(cia, cia)} chegando atrasados ({v:.1f})'
+    if feat.startswith('voos_orig_'):
+        orig = feat[len('voos_orig_'):]
+        return f'voos atrasados chegando de {_ORIG_NOMES.get(orig, orig)} ({v:.1f})'
+    if feat == 'voos_linha_N':         return f'voos nacionais chegando atrasados ({v:.1f})'
+    if feat == 'voos_linha_I':         return f'voos internacionais chegando atrasados ({v:.1f})'
+    if feat.startswith('voos_sev_'):   return f'chegadas com atraso {feat[len("voos_sev_"):]} ({v:.1f})'
     if feat.endswith(('_sin', '_cos')): return f'{feat} (componente cíclica)'
     return f'{feat} ({v:.3f})'
+
+def _detalhe_voos_historicos(t_utc):
+    """Perfil histórico de voos que CHEGAM atrasados no slot (hora UTC × dia-da-semana).
+    Enquadramento correto: são passageiros DESEMBARCANDO na chegada — é a eles que o motorista
+    atende. Retorna dict com texto legível + métricas de RECORRÊNCIA, ou None se não houver slot.
+
+    Recorrência: exige atrasos em >= MIN_DIAS_RECORRENCIA datas distintas E concentração de uma
+    mesma CIA ou origem >= CONC_MIN_RECORRENCIA. Sem isso, o padrão é esporádico (não recomendar)."""
+    mask = ((df_voos['CHEGADA_REAL'].dt.hour == t_utc.hour) &
+            (df_voos['CHEGADA_REAL'].dt.dayofweek == t_utc.dayofweek))
+    slot = df_voos[mask].dropna(subset=['CHEGADA_REAL'])
+    if slot.empty:
+        return None
+
+    n_registros = int(len(slot))
+    n_dias = int(slot['CHEGADA_REAL'].dt.normalize().nunique())
+
+    partes = []
+    conc_cia = conc_orig = 0.0
+    if 'ICAO_EMPRESA_AEREA' in slot.columns:
+        vc = slot['ICAO_EMPRESA_AEREA'].value_counts()
+        conc_cia = float(vc.iloc[0] / n_registros) if not vc.empty else 0.0
+        nomes = [_CIA_NOMES.get(c, c) for c in vc.head(2).index.tolist()]
+        partes.append(f'CIA: {" / ".join(nomes)}')
+    if 'ICAO_AERODROMO_ORIGEM' in slot.columns:
+        vc = slot['ICAO_AERODROMO_ORIGEM'].value_counts()
+        conc_orig = float(vc.iloc[0] / n_registros) if not vc.empty else 0.0
+        nomes = [_ORIG_NOMES.get(o, o) for o in vc.head(2).index.tolist()]
+        partes.append(f'Chegando de: {" / ".join(nomes)}')
+    if 'CODIGO_TIPO_LINHA' in slot.columns:
+        lt = slot['CODIGO_TIPO_LINHA'].astype(str).str.strip().str.upper().value_counts()
+        if not lt.empty:
+            dom = lt.index[0]
+            partes.append('Linha: ' + ('nacional' if dom == 'N' else 'internacional' if dom == 'I' else dom))
+    t_local = t_utc.tz_convert(TZ_LOCAL)
+    med_min = int(slot['CHEGADA_REAL'].dt.minute.median())
+    partes.append(f'Chegada (desembarque) prevista: por volta das {t_local.hour:02d}h{med_min:02d} (horário local)')
+    partes.append(f'Histórico: {n_registros} chegadas atrasadas em {n_dias} dia(s) distinto(s)')
+
+    recorrente = (n_dias >= MIN_DIAS_RECORRENCIA and
+                  max(conc_cia, conc_orig) >= CONC_MIN_RECORRENCIA)
+    return {'texto': ' | '.join(partes), 'recorrente': recorrente,
+            'n_dias': n_dias, 'n_registros': n_registros,
+            'conc_cia': conc_cia, 'conc_orig': conc_orig}
 
 def _top_shap(nome, X, top_n):
     """Top-N features por |SHAP| para a classe positiva do modelo binário `nome`."""
@@ -521,7 +664,6 @@ def predizer(dt_local, top_n=6):
     }
 
 print('predizer() pronto (decide demanda e retorna SHAP das duas dimensões).')
-
 %%CELL markdown
 ## 8. Ficha técnica (features + valores que decidiram)
 
@@ -529,6 +671,21 @@ Passo 5 do fluxo: quando há demanda, expomos **exatamente quais features e com 
 puxaram a decisão — para o motorista conferir pessoalmente e reportar se acertou.
 
 %%CELL code
+def _contexto_reputacao(t_utc, max_itens=3):
+    """Texto explicativo (NÃO entra no modelo): piores CIAs/origens históricas do slot.
+    Fonte: reputacao_slot_sbpa.csv (05_6). Reputação = taxa de atraso histórica do par;
+    share = fração dos voos daquele horário/dia. Usa os mapas _CIA_NOMES/_ORIG_NOMES."""
+    itens = REPUTACAO_SLOT.get((t_utc.dayofweek, t_utc.hour))
+    if not itens:
+        return None
+    partes = []
+    for it in itens[:max_itens]:
+        cia = _CIA_NOMES.get(it['cia'], it['cia'])
+        org = _ORIG_NOMES.get(it['origem'], it['origem'])
+        partes.append(f"{cia} vindo de {org} ({it['rep']:.0%} de atraso histórico, "
+                      f"{it['share']:.0%} dos voos do horário)")
+    return ' | '.join(partes)
+
 def ficha_tecnica(res, dimensao=None, top_n=6):
     """Imprime a ficha objetiva feature -> valor -> efeito da dimensão indicada
     (ou da dominante, se houver demanda; senão, da de maior probabilidade)."""
@@ -538,6 +695,10 @@ def ficha_tecnica(res, dimensao=None, top_n=6):
     for t in res[dim]['top_shap'][:top_n]:
         efeito = 'AUMENTA' if t['shap'] > 0 else 'reduz'
         print(f'    • {t["label"]:<48} {efeito} a chance  [SHAP {t["shap"]:+.3f}]')
+    if dim == 'atraso':
+        ctx_rep = _contexto_reputacao(res['contexto']['t_utc'])
+        if ctx_rep:
+            print(f'    Piores históricos neste horário: {ctx_rep}')
     return dim
 
 print('ficha_tecnica() pronta.')
@@ -569,24 +730,40 @@ print('varrer_para_frente() pronto.')
 os.environ.pop('ANTHROPIC_WORKSPACE_ID', None)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# A instrução sobre voos depende da config exportada pelo 05_6 (FEATURES_VOO_ATIVAS):
-# se as features de voo NÃO entraram nos modelos (padrão rigoroso pós-fato), a narração NÃO pode
-# alegar contagens/atrasos de voo — a dimensão "atraso" reflete padrões de clima+tempo associados
-# a corridas geradas por atraso. Instruir o LLM a mentir valores de voo aqui seria alucinação.
 _INSTR_VOO = (
     'SEMPRE cite os VALORES concretos que pesaram (ex.: "temperatura de 33°C", '
-    '"atraso médio de 40 min", "12 voos atrasados típicos"), pois o motorista vai conferir pessoalmente.'
+    '"atraso médio de 40 min na chegada"). Quando o contexto histórico de voos estiver '
+    'disponível (CIA, de onde chegam, linha, horário de chegada), incorpore esses detalhes '
+    'naturalmente — o motorista quer saber quais desembarques esperar.'
     if FEATURES_VOO_ATIVAS else
     'Cite os VALORES climáticos/temporais concretos que pesaram (ex.: "temperatura de 33°C", '
-    '"18h de sexta"), pois o motorista vai conferir pessoalmente. NÃO invente números de voos '
-    'nem minutos de atraso: nesta configuração a leitura de atraso de voo vem de PADRÕES de clima '
-    'e horário associados a picos causados por atrasos, não de contagens diretas de voos.')
+    '"18h de sexta"). NÃO invente números de voos nem minutos de atraso: nesta configuração '
+    'a leitura de atraso de voo vem de PADRÕES de clima e horário, não de contagens diretas. '
+    'Quando o contexto histórico de voos estiver disponível (CIA, de onde chegam, linha, '
+    'horário de chegada), use esses dados para contextualizar — mas sem alegar que são previstos.')
 
 SYSTEM_PROMPT = f"""Você é um assistente de demanda de corridas para motoristas de aplicativo em Porto Alegre, focado no Aeroporto Salgado Filho (SBPA).
 Explique a previsão de forma clara, direta e prática, em português, em 3 a 5 frases curtas.
 NÃO use jargão técnico (nada de "SHAP", "modelo", "probabilidade" cru, "feature").
 {_INSTR_VOO}
-Seja honesto sobre incerteza. Termine com uma recomendação objetiva de ir ou não ao aeroporto."""
+
+ENQUADRAMENTO OBRIGATÓRIO — o motorista busca passageiros que CHEGAM (desembarcam) de voos atrasados.
+NUNCA fale em voos que "saem" ou "partem" atrasados: o que gera corrida é o DESEMBARQUE na chegada.
+
+SEJA CONSERVADOR. Não é otimista por padrão. Regras de decisão:
+- Chance abaixo de 45% é BAIXA: por si só NÃO justifica ir ao aeroporto.
+- Só recomende IR quando houver sinal forte E consistente: uma das dimensões com chance claramente
+  alta (>= 50%) e, no caso de atraso de voo, um padrão RECORRENTE (o histórico deve indicar atrasos
+  na chegada se repetindo em vários dias, concentrados numa mesma CIA/origem). Se o padrão for
+  esporádico ou fraco, recomende NÃO ir, mesmo que exista algum sinal.
+- Na dúvida ou com sinais fracos/mistos, recomende NÃO se deslocar e explique o porquê.
+Seja honesto sobre a incerteza. Termine com uma recomendação objetiva (ir ou não), coerente com essas regras."""
+
+def _nivel_prob(p):
+    if p < LIMIAR_BAIXA: return 'BAIXA'
+    if p < LIMIAR_EVENTO: return 'MODERADA'
+    if p < 0.65: return 'ALTA'
+    return 'MUITO ALTA'
 
 def _bloco_fatores(top):
     return '\n'.join(
@@ -597,35 +774,114 @@ def _montar_prompt(res, cenario):
     ctx = res['contexto']
     quando = ctx['dt_local'].strftime('%d/%m/%Y às %Hh')
     dia = DIAS_SEMANA[ctx['dt_local'].dayofweek]
-    aviso_clima = '' if ctx['clima_disponivel'] else '\n(OBS: sem previsão climática para esta hora; baseado em histórico/climatologia.)'
-    rotulo_atraso = ('ATRASO DE VOO (SBPA)' if FEATURES_VOO_ATIVAS else
-                     'ATRASO DE VOO (inferido por padrões de clima+horário; sem contagens diretas de voos)')
+    aviso_clima = ('' if ctx['clima_disponivel']
+                   else '\n(OBS: sem previsão climática para esta hora; baseado em histórico/climatologia.)')
+    rotulo_atraso = ('ATRASO DE VOO na chegada (SBPA)' if FEATURES_VOO_ATIVAS
+                     else 'ATRASO DE VOO na chegada (inferido por padrões de clima+horário; sem contagens diretas)')
+
+    det = _detalhe_voos_historicos(ctx['t_utc'])
+    if det is None:
+        bloco_voos = ('\nContexto histórico de voos: sem registros de chegadas atrasadas nesse '
+                      'horário e dia da semana.')
+        recorrencia = 'RECORRÊNCIA do atraso: sem histórico — trate como sinal FRACO.'
+    else:
+        bloco_voos = ('\nContexto histórico de voos atrasados chegando nesse horário/dia da semana '
+                      '(passageiros desembarcando):\n  ' + det['texto'])
+        if det['recorrente']:
+            recorrencia = (f'RECORRÊNCIA do atraso: RECORRENTE (atrasos na chegada em {det["n_dias"]} '
+                           f'dias distintos, concentração de CIA/origem até '
+                           f'{max(det["conc_cia"], det["conc_orig"]):.0%}). Padrão consistente.')
+        else:
+            recorrencia = (f'RECORRÊNCIA do atraso: NÃO recorrente / esporádico (só {det["n_dias"]} '
+                           f'dia(s) distinto(s), concentração até '
+                           f'{max(det["conc_cia"], det["conc_orig"]):.0%}). NÃO recomende ir só por '
+                           f'causa do atraso.')
+
+    ctx_rep = _contexto_reputacao(ctx['t_utc'])
+    bloco_rep = ('' if not ctx_rep else
+                 '\nReputação histórica (companhias/origens que MAIS atrasam neste horário/dia; '
+                 'contexto para explicar o padrão, NÃO são previsões de voos específicos):\n  ' + ctx_rep)
+
     return f"""Consulta do motorista para {quando} ({dia}).{aviso_clima}
 
 Duas dimensões avaliadas de forma independente (cada uma contra "sem pico de corridas"):
-  - Chance de pico por EVENTO CLIMÁTICO: {res['prob_clima']:.1%}
-  - Chance de pico por {rotulo_atraso}: {res['prob_atraso']:.1%}
+  - Chance de pico por EVENTO CLIMÁTICO: {res['prob_clima']:.1%} (nível: {_nivel_prob(res['prob_clima'])})
+  - Chance de pico por {rotulo_atraso}: {res['prob_atraso']:.1%} (nível: {_nivel_prob(res['prob_atraso'])})
+Lembrete: níveis BAIXA (<45%) não justificam ir por si sós.
+
+{recorrencia}
 
 Fatores que mais pesaram na dimensão climática (com valores):
 {_bloco_fatores(res['clima']['top_shap'])}
 
-Fatores que mais pesaram na dimensão de atraso de voo (com valores):
+Fatores que mais pesaram na dimensão de atraso de voo na chegada (com valores):
 {_bloco_fatores(res['atraso']['top_shap'])}
+{bloco_voos}{bloco_rep}
 
 Situação: {cenario}
 
-Explique ao motorista, citando os valores concretos, se vale a pena ir ao aeroporto e por quê."""
+Explique ao motorista, citando os valores concretos e os detalhes do voo quando disponíveis, se
+vale a pena ir ao aeroporto e por quê. Siga as regras conservadoras: só recomende ir com sinal
+forte e (para atraso) recorrente; caso contrário, recomende não ir."""
+
+def _features_enviadas(res):
+    """Features/valores efetivamente enviados ao prompt (para o log)."""
+    def _lst(dim):
+        return [{'feature': t['feature'], 'valor': t['valor'], 'shap': t['shap'], 'label': t['label']}
+                for t in res[dim]['top_shap']]
+    det = _detalhe_voos_historicos(res['contexto']['t_utc'])
+    return {
+        'prob_clima': res['prob_clima'], 'prob_atraso': res['prob_atraso'],
+        'nivel_clima': _nivel_prob(res['prob_clima']), 'nivel_atraso': _nivel_prob(res['prob_atraso']),
+        'clima': _lst('clima'), 'atraso': _lst('atraso'),
+        'voos_historico': det,
+        'reputacao_slot': REPUTACAO_SLOT.get((res['contexto']['t_utc'].dayofweek,
+                                              res['contexto']['t_utc'].hour)),
+    }
+
+def _custo_tokens(usage):
+    it = getattr(usage, 'input_tokens', 0) or 0
+    ot = getattr(usage, 'output_tokens', 0) or 0
+    cr = getattr(usage, 'cache_read_input_tokens', 0) or 0
+    cw = getattr(usage, 'cache_creation_input_tokens', 0) or 0
+    return round(it/1e6*PRECO_LLM['input'] + ot/1e6*PRECO_LLM['output']
+                 + cr/1e6*PRECO_LLM['cache_read'] + cw/1e6*PRECO_LLM['cache_write'], 6)
 
 def narrar(res, cenario):
     prompt = _montar_prompt(res, cenario)
+    ts_req = datetime.datetime.now(TZ_LOCAL).isoformat()
+    t0 = time.perf_counter()
     resp = client.messages.create(
-        model=MODEL_LLM, max_tokens=350, system=SYSTEM_PROMPT,
+        model=MODEL_LLM, max_tokens=400, system=SYSTEM_PROMPT,
         messages=[{'role': 'user', 'content': prompt}],
         workspace_id=anthropic.NOT_GIVEN)
-    return resp.content[0].text
+    tempo_resp = round(time.perf_counter() - t0, 3)
+    texto = resp.content[0].text
 
-print('narrar() pronto.')
+    registro = {
+        'horario_solicitacao': ts_req,          # 4 - horário da solicitação (local)
+        'tempo_resposta_s': tempo_resp,          # 5 - tempo de resposta
+        'modelo': MODEL_LLM,
+        'cenario': cenario,
+        'features_enviadas': _features_enviadas(res),  # 1 - features e valores enviados ao prompt
+        'prompt': prompt,                        # 2 - o prompt
+        'resposta': texto,                       # 3 - a resposta
+        'tokens': {                              # 6 - custo de tokens (contagem + USD)
+            'input': getattr(resp.usage, 'input_tokens', None),
+            'output': getattr(resp.usage, 'output_tokens', None),
+            'cache_read': getattr(resp.usage, 'cache_read_input_tokens', None),
+            'cache_write': getattr(resp.usage, 'cache_creation_input_tokens', None),
+        },
+        'custo_usd': _custo_tokens(resp.usage),
+    }
+    try:
+        with open(LOG_NARRADOR, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(registro, ensure_ascii=False) + '\n')
+    except Exception as e:
+        print(f'[log] não consegui gravar em {LOG_NARRADOR}: {e}')
+    return texto
 
+print('narrar() pronto (conservador, enquadramento de chegada, com log em', LOG_NARRADOR, ').')
 %%CELL markdown
 ## 11. Ponto de entrada — pergunta do motorista → veredito
 
