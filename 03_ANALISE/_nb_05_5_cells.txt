@@ -103,11 +103,18 @@ LIMIAR_BAIXA  = 0.45    # prob < este valor => chance BAIXA (a narração NÃO d
 HORAS_SCAN    = [1, 2]  # passo 6: varredura para frente se não houver demanda no horário pedido
 
 # Critério de RECORRÊNCIA do atraso (feedback: só sugerir ir se o padrão for consistente).
-# Um slot (hora×dia-da-semana) só é considerado "recorrente" se voos chegaram atrasados em
-# pelo menos MIN_DIAS_RECORRENCIA datas distintas no histórico, com concentração relevante
-# de uma mesma CIA/origem (>= CONC_MIN_RECORRENCIA da amostra do slot).
+# Um slot (hora×dia-da-semana) só é considerado "recorrente" (nível FORTE) se voos chegaram
+# atrasados em pelo menos MIN_DIAS_RECORRENCIA datas distintas no histórico, com concentração
+# relevante de uma mesma CIA/origem (>= CONC_MIN_RECORRENCIA da amostra do slot).
 MIN_DIAS_RECORRENCIA  = 3
 CONC_MIN_RECORRENCIA  = 0.40
+
+# Padrão PLAUSÍVEL (amplificação do sinal, v0.13.0): mesmo sem vários dias, uma concentração
+# FORTE de uma mesma CIA/origem já é sinal a considerar (atrasos esporádicos, mas com padrão
+# identificável). Fica ENTRE "recorrente" (forte) e "esporádico" (fraco): não recomenda sozinho,
+# mas deixa de ser descartado — combinado com boa chance do modelo, pode justificar ir.
+CONC_FORTE_PLAUSIVEL  = 0.50   # concentração de CIA/origem que caracteriza padrão plausível
+MIN_DIAS_PLAUSIVEL    = 1      # basta 1 dia distinto se a concentração for forte
 
 # ---- Log das consultas ao LLM ----
 LOG_NARRADOR = f'{DRIVE_BASE}/log_narrador.jsonl'
@@ -120,12 +127,14 @@ TZ_LOCAL = ZoneInfo('America/Sao_Paulo')
 # ---- Aeroporto Salgado Filho (SBPA) ----
 AER_LAT, AER_LNG = -29.9939, -51.1711
 
-# ---- Distância representativa (contexto do motorista) ----
-# Os modelos usam dist_aeroporto_km (origem->SBPA) por EVENTO. A pergunta do narrador é sobre
-# DEMANDA no horário (não um evento específico), então mantemos a distância FIXA num valor
-# urbano representativo e a tratamos como variável de contexto constante (documentado). Ajuste
-# se quiser simular o motorista já próximo (~0) ou mais distante do aeroporto.
-DIST_REPRESENTATIVA_KM = 8.0
+# ---- Esforço do motorista (distância informada por consulta) ----
+# A distância NÃO é mais feature do modelo (o 05_6 a removeu: como era servida como constante
+# fixa, poluía o SHAP com um valor que nunca variava). Aqui ela vira um FATOR DE ESFORÇO: quanto
+# mais longe o motorista está do aeroporto, mais forte o sinal precisa ser para valer a viagem.
+# O motorista informa a distância por consulta (consultar(..., dist_km=...)); abaixo só o default.
+DIST_MOTORISTA_KM = 8.0     # distância default (km) do motorista até o SBPA; sobrescrita por consulta
+VEL_MEDIA_KMH     = 30.0    # velocidade média urbana p/ estimar os minutos de deslocamento
+PESO_ESFORCO      = 0.02    # quanto cada km eleva a "barra de confiança" da recomendação (com teto)
 
 # ---- Endpoints Open-Meteo (previsão futura) ----
 OPENMETEO_URL = ('https://customer-api.open-meteo.com/v1/forecast' if OPENMETEO_API_KEY
@@ -440,8 +449,21 @@ def _eh_feature_voo(f):
     return (f.startswith('voos_') or
             f in ('qtd_voos_previstos', 'qtd_empresas_aereas', 'atraso_medio_min', 'atraso_max_min'))
 
-def construir_features(dt_local):
-    """Retorna (DataFrame 1 linha com superconjunto de features, dict de contexto)."""
+def _esforco(dist_km):
+    """Traduz a distância informada pelo motorista em 'esforço' e ajusta a barra de decisão.
+    NÃO é feature do modelo (não entra em X nem no SHAP): só modula a RECOMENDAÇÃO — quanto mais
+    longe, mais forte o sinal precisa ser para compensar a viagem. Retorna dict
+    {km, minutos, tier, limiar_ajustado}."""
+    km = float(dist_km)
+    minutos = km / VEL_MEDIA_KMH * 60.0
+    tier = 'perto' if km <= 5 else ('médio' if km <= 15 else 'longe')
+    limiar_ajustado = min(LIMIAR_EVENTO + PESO_ESFORCO * km, 0.75)   # teto p/ não travar sempre
+    return {'km': km, 'minutos': minutos, 'tier': tier, 'limiar_ajustado': limiar_ajustado}
+
+def construir_features(dt_local, dist_km=None):
+    """Retorna (DataFrame 1 linha com superconjunto de features, dict de contexto).
+    dist_km: distância do motorista ao SBPA (esforço). NÃO entra nas features/SHAP — fica só no
+    contexto, para ajustar a barra de decisão na narração."""
     t_utc = _para_utc(dt_local).floor('h')          # JANELA=1h => floor horário
     clima_atual = _clima_na_hora(t_utc)
     clima_lag   = _clima_na_hora(t_utc - pd.Timedelta('1h'))
@@ -464,8 +486,8 @@ def construir_features(dt_local):
         for c in COLS_VOOS:
             row[c] = 0.0
 
-    # Distância (contexto fixo) — só relevante se USE_DIST e a feature estiver no modelo.
-    row['dist_aeroporto_km'] = DIST_REPRESENTATIVA_KM
+    # (Distância NÃO entra mais no row: virou 'esforço' do motorista, guardado no contexto abaixo,
+    #  fora das features/SHAP. O modelo do 05_6 também não a exporta mais em features_lgbm.)
 
     # Temporal (UTC, como no treino).
     row['hora'] = t_utc.hour; row['mes'] = t_utc.month; row['dia_semana'] = t_utc.dayofweek
@@ -486,8 +508,10 @@ def construir_features(dt_local):
             row[c] = CLIM_FALLBACK[c]
 
     dt_loc = _para_utc(dt_local).tz_convert(TZ_LOCAL)
+    dist = DIST_MOTORISTA_KM if dist_km is None else float(dist_km)
     ctx = {'t_utc': t_utc, 'dt_local': dt_loc,
-           'clima_disponivel': bool(clima_atual)}
+           'clima_disponivel': bool(clima_atual),
+           'dist_km': dist, 'esforco': _esforco(dist)}
     return pd.DataFrame([row]), ctx
 
 def _preparar_X(df_full, features):
@@ -542,7 +566,6 @@ def _label_feature(feat, valor):
                 'wind_speed_10m': 'velocidade do vento', 'surface_pressure': 'pressão'}.get(feat, feat)
         return f'{base} ({v})'
     mapa = {
-        'dist_aeroporto_km':        f'distância ao aeroporto ({v:.1f} km)',
         'temperature_2m':           f'temperatura ({v:.1f}°C)',
         'relative_humidity_2m':     f'umidade relativa ({v:.0f}%)',
         'dew_point_2m':             f'ponto de orvalho ({v:.1f}°C)',
@@ -587,8 +610,12 @@ def _detalhe_voos_historicos(t_utc):
     Enquadramento correto: são passageiros DESEMBARCANDO na chegada — é a eles que o motorista
     atende. Retorna dict com texto legível + métricas de RECORRÊNCIA, ou None se não houver slot.
 
-    Recorrência: exige atrasos em >= MIN_DIAS_RECORRENCIA datas distintas E concentração de uma
-    mesma CIA ou origem >= CONC_MIN_RECORRENCIA. Sem isso, o padrão é esporádico (não recomendar)."""
+    Nível do padrão (graduado, v0.13.0):
+      - 'forte'      : >= MIN_DIAS_RECORRENCIA dias distintos E concentração >= CONC_MIN_RECORRENCIA
+                       (padrão consistente — pode justificar ir sozinho).
+      - 'plausivel'  : concentração forte (>= CONC_FORTE_PLAUSIVEL) mesmo com poucos dias
+                       (>= MIN_DIAS_PLAUSIVEL) — sinal a considerar, não descartar.
+      - 'esporadico' : caso contrário (fraco — não recomendar só por atraso)."""
     mask = ((df_voos['CHEGADA_REAL'].dt.hour == t_utc.hour) &
             (df_voos['CHEGADA_REAL'].dt.dayofweek == t_utc.dayofweek))
     slot = df_voos[mask].dropna(subset=['CHEGADA_REAL'])
@@ -620,9 +647,15 @@ def _detalhe_voos_historicos(t_utc):
     partes.append(f'Chegada (desembarque) prevista: por volta das {t_local.hour:02d}h{med_min:02d} (horário local)')
     partes.append(f'Histórico: {n_registros} chegadas atrasadas em {n_dias} dia(s) distinto(s)')
 
-    recorrente = (n_dias >= MIN_DIAS_RECORRENCIA and
-                  max(conc_cia, conc_orig) >= CONC_MIN_RECORRENCIA)
-    return {'texto': ' | '.join(partes), 'recorrente': recorrente,
+    conc_max = max(conc_cia, conc_orig)
+    if n_dias >= MIN_DIAS_RECORRENCIA and conc_max >= CONC_MIN_RECORRENCIA:
+        nivel = 'forte'
+    elif conc_max >= CONC_FORTE_PLAUSIVEL and n_dias >= MIN_DIAS_PLAUSIVEL:
+        nivel = 'plausivel'     # concentração forte mesmo com poucos dias -> sinal a considerar
+    else:
+        nivel = 'esporadico'
+    recorrente = (nivel == 'forte')     # mantido p/ retrocompatibilidade
+    return {'texto': ' | '.join(partes), 'recorrente': recorrente, 'nivel': nivel,
             'n_dias': n_dias, 'n_registros': n_registros,
             'conc_cia': conc_cia, 'conc_orig': conc_orig}
 
@@ -641,9 +674,10 @@ def _top_shap(nome, X, top_n):
              'shap': float(vals[i]),
              'label': _label_feature(feats[i], fv[i])} for i in ordem]
 
-def predizer(dt_local, top_n=6):
-    """Roda os dois modelos pareados sobre a janela e decide se há demanda ('pico')."""
-    df_full, ctx = construir_features(dt_local)
+def predizer(dt_local, dist_km=None, top_n=6):
+    """Roda os dois modelos pareados sobre a janela e decide se há demanda ('pico').
+    dist_km: distância do motorista (esforço) — não altera os modelos/SHAP, só o contexto."""
+    df_full, ctx = construir_features(dt_local, dist_km=dist_km)
     dims = {}
     for nome, d in MODELOS.items():
         X = _preparar_X(df_full, d['features'])
@@ -696,9 +730,19 @@ def ficha_tecnica(res, dimensao=None, top_n=6):
         efeito = 'AUMENTA' if t['shap'] > 0 else 'reduz'
         print(f'    • {t["label"]:<48} {efeito} a chance  [SHAP {t["shap"]:+.3f}]')
     if dim == 'atraso':
+        det = _detalhe_voos_historicos(res['contexto']['t_utc'])
+        if det:
+            _rot = {'forte': 'RECORRENTE (forte)', 'plausivel': 'PLAUSÍVEL (concentrado)',
+                    'esporadico': 'esporádico (fraco)'}[det['nivel']]
+            print(f'    Padrão de atraso: {_rot} — {det["n_dias"]} dia(s) distinto(s), '
+                  f'concentração até {max(det["conc_cia"], det["conc_orig"]):.0%}.')
         ctx_rep = _contexto_reputacao(res['contexto']['t_utc'])
         if ctx_rep:
             print(f'    Piores históricos neste horário: {ctx_rep}')
+    esf = res['contexto'].get('esforco')
+    if esf:
+        print(f'    Esforço do motorista: ~{esf["km"]:.0f} km, ~{esf["minutos"]:.0f} min '
+              f'(esforço {esf["tier"]}) — barra de confiança ajustada p/ {esf["limiar_ajustado"]:.0%}.')
     return dim
 
 print('ficha_tecnica() pronta.')
@@ -709,13 +753,13 @@ print('ficha_tecnica() pronta.')
 Se não há demanda no horário pedido, procuramos nas próximas horas (`HORAS_SCAN = [1, 2]`).
 
 %%CELL code
-def varrer_para_frente(dt_local, horas=None):
+def varrer_para_frente(dt_local, dist_km=None, horas=None):
     """Avalia dt_local + h para cada h em `horas`; devolve o primeiro com demanda (ou None)."""
     horas = horas or HORAS_SCAN
     achados = []
     for h in horas:
         alvo = pd.Timestamp(dt_local) + pd.Timedelta(hours=h)
-        r = predizer(alvo)
+        r = predizer(alvo, dist_km=dist_km)
         achados.append({'horas_a_frente': h, 'dt_local': alvo, 'resultado': r})
         if r['tem_demanda']:
             return {'encontrou': True, 'slot': achados[-1], 'todos': achados}
@@ -750,13 +794,17 @@ NÃO use jargão técnico (nada de "SHAP", "modelo", "probabilidade" cru, "featu
 ENQUADRAMENTO OBRIGATÓRIO — o motorista busca passageiros que CHEGAM (desembarcam) de voos atrasados.
 NUNCA fale em voos que "saem" ou "partem" atrasados: o que gera corrida é o DESEMBARQUE na chegada.
 
-SEJA CONSERVADOR. Não é otimista por padrão. Regras de decisão:
+SEJA CONSERVADOR, mas não pessimista: padrões plausíveis contam. Regras de decisão:
 - Chance abaixo de 45% é BAIXA: por si só NÃO justifica ir ao aeroporto.
-- Só recomende IR quando houver sinal forte E consistente: uma das dimensões com chance claramente
-  alta (>= 50%) e, no caso de atraso de voo, um padrão RECORRENTE (o histórico deve indicar atrasos
-  na chegada se repetindo em vários dias, concentrados numa mesma CIA/origem). Se o padrão for
-  esporádico ou fraco, recomende NÃO ir, mesmo que exista algum sinal.
-- Na dúvida ou com sinais fracos/mistos, recomende NÃO se deslocar e explique o porquê.
+- Recomende IR quando houver sinal forte (uma das dimensões com chance claramente alta, >= 50%) E:
+  * um padrão de atraso RECORRENTE (atrasos na chegada se repetindo em vários dias, concentrados
+    numa mesma CIA/origem), OU
+  * um padrão PLAUSÍVEL (atrasos concentrados numa mesma CIA/origem, mesmo com poucos dias) — esses
+    padrões, embora esporádicos, são sinais REAIS: considere-os, não os descarte como ruído.
+- Pondere SEMPRE o ESFORÇO do motorista: quanto mais longe (mais km/minutos), mais forte o sinal
+  precisa ser para compensar a viagem. Use a barra ajustada informada como referência.
+- Atraso puramente esporádico/fraco (sem concentração) NÃO justifica ir só por causa dele.
+- Na dúvida, ou com sinais fracos/mistos e esforço alto, recomende NÃO se deslocar e explique o porquê.
 Seja honesto sobre a incerteza. Termine com uma recomendação objetiva (ir ou não), coerente com essas regras."""
 
 def _nivel_prob(p):
@@ -783,24 +831,37 @@ def _montar_prompt(res, cenario):
     if det is None:
         bloco_voos = ('\nContexto histórico de voos: sem registros de chegadas atrasadas nesse '
                       'horário e dia da semana.')
-        recorrencia = 'RECORRÊNCIA do atraso: sem histórico — trate como sinal FRACO.'
+        recorrencia = 'PADRÃO do atraso: sem histórico — trate como sinal FRACO.'
     else:
         bloco_voos = ('\nContexto histórico de voos atrasados chegando nesse horário/dia da semana '
                       '(passageiros desembarcando):\n  ' + det['texto'])
-        if det['recorrente']:
-            recorrencia = (f'RECORRÊNCIA do atraso: RECORRENTE (atrasos na chegada em {det["n_dias"]} '
-                           f'dias distintos, concentração de CIA/origem até '
-                           f'{max(det["conc_cia"], det["conc_orig"]):.0%}). Padrão consistente.')
+        _conc = max(det['conc_cia'], det['conc_orig'])
+        if det['nivel'] == 'forte':
+            recorrencia = (f'PADRÃO do atraso: RECORRENTE / consistente (atrasos na chegada em '
+                           f'{det["n_dias"]} dias distintos, concentração de CIA/origem até '
+                           f'{_conc:.0%}). Sinal FORTE — pode justificar ir.')
+        elif det['nivel'] == 'plausivel':
+            recorrencia = (f'PADRÃO do atraso: PLAUSÍVEL — atrasos concentrados numa mesma '
+                           f'CIA/origem ({_conc:.0%}), mesmo com poucos dias ({det["n_dias"]}). '
+                           f'É um sinal a CONSIDERAR: pode justificar ir se combinar com uma boa '
+                           f'chance do modelo. NÃO descarte como esporádico.')
         else:
-            recorrencia = (f'RECORRÊNCIA do atraso: NÃO recorrente / esporádico (só {det["n_dias"]} '
-                           f'dia(s) distinto(s), concentração até '
-                           f'{max(det["conc_cia"], det["conc_orig"]):.0%}). NÃO recomende ir só por '
+            recorrencia = (f'PADRÃO do atraso: esporádico / fraco (só {det["n_dias"]} dia(s) '
+                           f'distinto(s), concentração até {_conc:.0%}). NÃO recomende ir só por '
                            f'causa do atraso.')
 
     ctx_rep = _contexto_reputacao(ctx['t_utc'])
     bloco_rep = ('' if not ctx_rep else
                  '\nReputação histórica (companhias/origens que MAIS atrasam neste horário/dia; '
                  'contexto para explicar o padrão, NÃO são previsões de voos específicos):\n  ' + ctx_rep)
+
+    esf = ctx.get('esforco')
+    bloco_esforco = ('' if not esf else
+                     f'\nESFORÇO DO MOTORISTA: ~{esf["km"]:.0f} km até o aeroporto '
+                     f'(~{esf["minutos"]:.0f} min de deslocamento, esforço {esf["tier"]}). '
+                     f'Quanto maior o esforço, mais forte o sinal precisa ser para valer a viagem: '
+                     f'com este esforço, use a barra em torno de {esf["limiar_ajustado"]:.0%} como '
+                     f'referência para recomendar ir.')
 
     return f"""Consulta do motorista para {quando} ({dia}).{aviso_clima}
 
@@ -816,13 +877,13 @@ Fatores que mais pesaram na dimensão climática (com valores):
 
 Fatores que mais pesaram na dimensão de atraso de voo na chegada (com valores):
 {_bloco_fatores(res['atraso']['top_shap'])}
-{bloco_voos}{bloco_rep}
+{bloco_voos}{bloco_rep}{bloco_esforco}
 
 Situação: {cenario}
 
 Explique ao motorista, citando os valores concretos e os detalhes do voo quando disponíveis, se
-vale a pena ir ao aeroporto e por quê. Siga as regras conservadoras: só recomende ir com sinal
-forte e (para atraso) recorrente; caso contrário, recomende não ir."""
+vale a pena ir ao aeroporto e por quê. Siga as regras conservadoras: recomende ir com sinal forte
+e padrão (recorrente OU plausível concentrado), ponderando o esforço; caso contrário, recomende não ir."""
 
 def _features_enviadas(res):
     """Features/valores efetivamente enviados ao prompt (para o log)."""
@@ -835,6 +896,8 @@ def _features_enviadas(res):
         'nivel_clima': _nivel_prob(res['prob_clima']), 'nivel_atraso': _nivel_prob(res['prob_atraso']),
         'clima': _lst('clima'), 'atraso': _lst('atraso'),
         'voos_historico': det,
+        'nivel_recorrencia': det['nivel'] if det else None,
+        'esforco': res['contexto'].get('esforco'),
         'reputacao_slot': REPUTACAO_SLOT.get((res['contexto']['t_utc'].dayofweek,
                                               res['contexto']['t_utc'].hour)),
     }
@@ -908,8 +971,10 @@ def _extrair_datetime_local(pergunta):
     except Exception:
         return agora.replace(minute=0, second=0, microsecond=0, tzinfo=None) + datetime.timedelta(hours=1)
 
-def consultar(pergunta_ou_dt, imprimir=True):
-    """Fluxo completo (6 passos). Aceita texto em linguagem natural ou datetime local."""
+def consultar(pergunta_ou_dt, dist_km=None, imprimir=True):
+    """Fluxo completo (6 passos). Aceita texto em linguagem natural ou datetime local.
+    dist_km: distância do motorista ao SBPA (esforço). Não entra no modelo/SHAP — só ajusta a
+    barra de recomendação. Se None, usa DIST_MOTORISTA_KM."""
     if isinstance(pergunta_ou_dt, str):
         dt_local = _extrair_datetime_local(pergunta_ou_dt)
         pergunta = pergunta_ou_dt
@@ -917,7 +982,7 @@ def consultar(pergunta_ou_dt, imprimir=True):
         dt_local = pergunta_ou_dt
         pergunta = f'consulta para {pd.Timestamp(dt_local):%d/%m/%Y %Hh}'
 
-    res = predizer(dt_local)
+    res = predizer(dt_local, dist_km=dist_km)
     quando = res['contexto']['dt_local'].strftime('%d/%m/%Y às %Hh')
 
     if res['tem_demanda']:
@@ -927,7 +992,7 @@ def consultar(pergunta_ou_dt, imprimir=True):
         saida = {'pergunta': pergunta, 'dt_local': dt_local, 'veredito': 'SIM',
                  'resultado': res, 'narrativa': narrativa, 'scan': None}
     else:
-        scan = varrer_para_frente(dt_local)
+        scan = varrer_para_frente(dt_local, dist_km=dist_km)
         if scan['encontrou']:
             s = scan['slot']; qs = s['resultado']['contexto']['dt_local'].strftime('%d/%m/%Y às %Hh')
             cenario = (f'NÃO há demanda no horário pedido ({quando}), MAS há em {qs} '
@@ -971,5 +1036,6 @@ _ = consultar('Vale a pena ir ao aeroporto amanhã às 18h?')
 _ = consultar('E depois de amanhã de manhã, às 7h?')
 
 %%CELL code
-# Também aceita datetime local direto:
-_ = consultar(datetime.datetime(2026, 9, 20, 15, 0, 0))
+# Também aceita datetime local direto, e a distância do motorista (esforço) por consulta:
+_ = consultar(datetime.datetime(2026, 9, 20, 15, 0, 0), dist_km=3)    # perto: barra mais baixa
+_ = consultar(datetime.datetime(2026, 9, 20, 15, 0, 0), dist_km=25)   # longe: exige sinal mais forte

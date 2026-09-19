@@ -2,6 +2,25 @@
 
 ---
 
+## [2026-09-19] — Distância vira "esforço da viagem" e o sinal de atraso ficou mais sensível a padrões
+
+### O que mudou
+- **A distância até o aeroporto saiu de dentro do modelo e virou um fator de "esforço" do motorista.** Antes, a distância era enviada ao modelo como um número fixo (sempre o mesmo), o que aparecia na explicação da resposta com um peso enganoso — parecia influenciar, mas nunca mudava. Agora ela sai da conta do modelo e passa a ser usada só na **recomendação**: quanto mais longe o motorista estiver, mais forte o sinal precisa ser para valer a viagem
+- **O motorista pode informar a distância em cada consulta.** Basta chamar `consultar(..., dist_km=3)` (perto) ou `dist_km=25` (longe). O assistente traduz isso em quilômetros, minutos estimados de deslocamento e um nível de esforço (perto / médio / longe), e ajusta a "barra de confiança" da recomendação de acordo. Sem informar, ele usa uma distância padrão
+- **O sinal de atraso de voo ficou mais sensível a padrões plausíveis.** Antes, um horário só era considerado promissor se os atrasos se repetissem em vários dias distintos. Agora há um nível intermediário: mesmo com **poucos dias**, se os atrasos estiverem **fortemente concentrados** numa mesma companhia ou origem, isso passa a ser tratado como um **padrão plausível** — um sinal real a considerar, e não mais descartado como esporádico. Continuam existindo três níveis: recorrente (forte), plausível (concentrado) e esporádico (fraco)
+- **O modelo de atraso agora "presta mais atenção" a esses casos.** No treino, a classe de atraso recebe um peso maior, aumentando a capacidade do modelo de captar padrões de atraso mesmo quando são menos frequentes (à custa de alguma precisão — é um ajuste intencional para não perder sinal). O peso é configurável
+- **A resposta ao motorista ficou mais completa:** além dos fatores de clima e do padrão de atraso, a ficha técnica agora mostra o esforço estimado da viagem (distância e minutos) e o nível do padrão de atraso daquele horário
+- **Fontes dos notebooks ressincronizadas** (`_nb_05_5_cells.txt` e `_nb_05_6_cells.txt`), com verificação de que a ida e volta (`.ipynb` → `.txt` → `.ipynb`) é idêntica célula a célula
+
+> **Atenção:** os modelos precisam ser **re-treinados** (basta re-executar o notebook `05_6` no Colab) para gerar as novas versões dos arquivos `.joblib`, já sem a distância e com o novo peso no atraso. O narrador (`05_5`) se ajusta sozinho ao carregar os modelos novos.
+
+### Ponto de retorno (rollback)
+```bash
+git revert HEAD --no-edit
+```
+
+---
+
 ## [2026-09-19] — Reputação da companhia aérea (global, por origem e situacional) e avaliação sem "espiar o futuro"
 
 ### O que mudou
